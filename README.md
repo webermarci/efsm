@@ -102,7 +102,8 @@ func main() {
 	badPayload := ConnectionData{RetryCount: 5, IPAddress: "192.168.1.100"}
 	err := sm.Fire(ctx, EventConnect, badPayload) // Invalid in Connected state
 	if err != nil {
-		fmt.Printf("Error: %v\n", err) // Output: event is not valid in current state: Connect in Connected
+		// Output: event is not valid in current state: Connect in Connected
+		fmt.Printf("Error: %v\n", err)
 	}
 }
 ```
