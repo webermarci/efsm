@@ -87,12 +87,14 @@ func TestStateMachine_Guard(t *testing.T) {
 	errGuardFailed := errors.New("too many retries")
 
 	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle).
-		PermitWithGuard(StateIdle, EventStart, StateRunning, func(ctx context.Context, transition efsm.Transition[State, Event], data *DataContext) error {
-			if data.Retries >= 3 {
-				return errGuardFailed
-			}
-			return nil
-		})
+		Permit(StateIdle, EventStart, StateRunning,
+			efsm.WithGuard(func(ctx context.Context, transition efsm.Transition[State, Event], data *DataContext) error {
+				if data.Retries >= 3 {
+					return errGuardFailed
+				}
+				return nil
+			}),
+		)
 
 	err := sm.Fire(context.Background(), EventStart, &DataContext{Retries: 5})
 	if err == nil {
@@ -114,6 +116,28 @@ func TestStateMachine_Guard(t *testing.T) {
 
 	if sm.State() != StateRunning {
 		t.Fatalf("expected state %v, got %v", StateRunning, sm.State())
+	}
+}
+
+func TestStateMachine_Effect(t *testing.T) {
+	t.Parallel()
+
+	effectCalled := false
+
+	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle).
+		Permit(StateIdle, EventStart, StateRunning,
+			efsm.WithEffect(func(ctx context.Context, transition efsm.Transition[State, Event], data *DataContext) {
+				effectCalled = true
+			}),
+		)
+
+	err := sm.Fire(context.Background(), EventStart, nil)
+	if err != nil {
+		t.Fatalf("unexpected error on valid transition: %v", err)
+	}
+
+	if !effectCalled {
+		t.Fatal("expected effect to be called on successful transition")
 	}
 }
 
@@ -174,17 +198,6 @@ func TestStateMachine_AvailableEvents(t *testing.T) {
 	}
 }
 
-func TestStateMachine_AvaliableEvents_Empty(t *testing.T) {
-	t.Parallel()
-
-	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
-
-	eventsForStates := sm.AvaliableEventsForStates()
-	if len(eventsForStates) != 0 {
-		t.Fatalf("expected 0 states in events map, got %d", len(eventsForStates))
-	}
-}
-
 func TestStateMachine_AvailableEventsForStates(t *testing.T) {
 	t.Parallel()
 
@@ -193,7 +206,7 @@ func TestStateMachine_AvailableEventsForStates(t *testing.T) {
 		Permit(StateIdle, EventFail, StateError).
 		Permit(StateRunning, EventReset, StateIdle)
 
-	eventsForStates := sm.AvaliableEventsForStates()
+	eventsForStates := sm.AvailableEventsForStates()
 
 	if len(eventsForStates) != 2 {
 		t.Fatalf("expected 2 states in events map, got %d", len(eventsForStates))
@@ -219,7 +232,7 @@ func TestStateMachine_AvailableEventsForStates_Empty(t *testing.T) {
 
 	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
 
-	eventsForStates := sm.AvaliableEventsForStates()
+	eventsForStates := sm.AvailableEventsForStates()
 	if len(eventsForStates) != 0 {
 		t.Fatalf("expected 0 states in events map, got %d", len(eventsForStates))
 	}

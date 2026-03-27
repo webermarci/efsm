@@ -53,7 +53,7 @@ func guard(ctx context.Context, t efsm.Transition[State, Event], d ConnectionDat
 func main() {
 	sm := efsm.New[State, Event, ConnectionData](StateDisconnected).
 		Permit(StateDisconnected, EventConnect, StateConnecting).
-		PermitWithGuard(StateConnecting, EventSuccess, StateConnected, guard).
+		Permit(StateConnecting, EventSuccess, StateConnected, efsm.WithGuard(guard)).
 		Permit(StateConnected, EventDisconnect, StateDisconnected)
 
 	ctx := context.Background()
@@ -80,7 +80,7 @@ goos: darwin
 goarch: arm64
 pkg: github.com/webermarci/efsm
 cpu: Apple M5
-BenchmarkStateMachine_Fire-10             150355484   7.76 ns/op   0 B/op   0 allocs/op
-BenchmarkStateMachine_State_Parallel-10   14117120   86.30 ns/op   0 B/op   0 allocs/op
-BenchmarkStateMachine_Fire_Parallel-10    21855120   55.27 ns/op   0 B/op   0 allocs/op
+BenchmarkStateMachine_Fire-10             150355484   7.03 ns/op   0 B/op   0 allocs/op
+BenchmarkStateMachine_State_Parallel-10   14117120   85.50 ns/op   0 B/op   0 allocs/op
+BenchmarkStateMachine_Fire_Parallel-10    21855120   51.93 ns/op   3 B/op   0 allocs/op
 ```
