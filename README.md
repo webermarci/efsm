@@ -52,9 +52,9 @@ func guard(ctx context.Context, t efsm.Transition[State, Event], d ConnectionDat
 
 func main() {
 	sm := efsm.New[State, Event, ConnectionData](StateDisconnected).
-		Permit(StateDisconnected, EventConnect, StateConnecting).
-		PermitWithGuard(StateConnecting, EventSuccess, StateConnected, guard).
-	  Permit(StateConnected, EventDisconnect, StateDisconnected)
+    Permit(StateDisconnected, EventConnect, StateConnecting).
+    PermitWithGuard(StateConnecting, EventSuccess, StateConnected, guard).
+    Permit(StateConnected, EventDisconnect, StateDisconnected)
 
 	ctx := context.Background()
 	data := ConnectionData{RetryCount: 1}
