@@ -92,8 +92,8 @@ func (sm *StateMachine[S, E, D]) Permit(state S, event E, target S, options ...T
 	return sm
 }
 
-// State returns the current state of the machine.
-func (sm *StateMachine[S, E, D]) State() S {
+// CurrentState returns the current state of the machine.
+func (sm *StateMachine[S, E, D]) CurrentState() S {
 	sm.mutex.RLock()
 	defer sm.mutex.RUnlock()
 	return sm.currentState

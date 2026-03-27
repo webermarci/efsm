@@ -32,7 +32,7 @@ func TestStateMachine_BasicRouting(t *testing.T) {
 	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle).
 		Permit(StateIdle, EventStart, StateRunning)
 
-	if state := sm.State(); state != StateIdle {
+	if state := sm.CurrentState(); state != StateIdle {
 		t.Fatalf("expected initial state %v, got %v", StateIdle, state)
 	}
 
@@ -41,7 +41,7 @@ func TestStateMachine_BasicRouting(t *testing.T) {
 		t.Fatalf("unexpected error on valid transition: %v", err)
 	}
 
-	if state := sm.State(); state != StateRunning {
+	if state := sm.CurrentState(); state != StateRunning {
 		t.Fatalf("expected state %v, got %v", StateRunning, state)
 	}
 }
@@ -61,8 +61,8 @@ func TestStateMachine_InvalidEvent(t *testing.T) {
 		t.Fatalf("expected ErrInvalidEvent, got %v", err)
 	}
 
-	if sm.State() != StateIdle {
-		t.Fatalf("expected state to remain %v, got %v", StateIdle, sm.State())
+	if sm.CurrentState() != StateIdle {
+		t.Fatalf("expected state to remain %v, got %v", StateIdle, sm.CurrentState())
 	}
 }
 
@@ -105,8 +105,8 @@ func TestStateMachine_Guard(t *testing.T) {
 		t.Fatalf("expected specific guard error, got %v", err)
 	}
 
-	if sm.State() != StateIdle {
-		t.Fatalf("expected state to remain %v after failed guard, got %v", StateIdle, sm.State())
+	if sm.CurrentState() != StateIdle {
+		t.Fatalf("expected state to remain %v after failed guard, got %v", StateIdle, sm.CurrentState())
 	}
 
 	err = sm.Fire(context.Background(), EventStart, &DataContext{Retries: 1})
@@ -114,8 +114,8 @@ func TestStateMachine_Guard(t *testing.T) {
 		t.Fatalf("expected transition to succeed, got %v", err)
 	}
 
-	if sm.State() != StateRunning {
-		t.Fatalf("expected state %v, got %v", StateRunning, sm.State())
+	if sm.CurrentState() != StateRunning {
+		t.Fatalf("expected state %v, got %v", StateRunning, sm.CurrentState())
 	}
 }
 
@@ -252,7 +252,7 @@ func TestStateMachine_Concurrency(t *testing.T) {
 	for range workers {
 		wg.Go(func() {
 			for range iterations {
-				currentState := sm.State()
+				currentState := sm.CurrentState()
 
 				targetEvent := 1
 				if currentState == 1 {
@@ -286,7 +286,7 @@ func BenchmarkStateMachine_State_Parallel(b *testing.B) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			_ = sm.State()
+			_ = sm.CurrentState()
 		}
 	})
 }
@@ -301,7 +301,7 @@ func BenchmarkStateMachine_Fire_Parallel(b *testing.B) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			st := sm.State()
+			st := sm.CurrentState()
 			target := 1
 			if st == 1 {
 				target = 0
