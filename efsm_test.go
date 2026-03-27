@@ -137,7 +137,7 @@ func TestStateMachine_Guard(t *testing.T) {
 	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
 
 	sm.State(StateIdle).Permit(EventStart, StateRunning,
-		efsm.WithGuard(func(ctx context.Context, transition efsm.Transition[State, Event], data *DataContext) error {
+		efsm.WithGuard(func(transition efsm.Transition[State, Event], data *DataContext) error {
 			if data.Retries >= 3 {
 				return errGuardFailed
 			}

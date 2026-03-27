@@ -25,7 +25,7 @@ type Transition[S comparable, E comparable] struct {
 }
 
 // Guard defines a callback function executed during a state transition.
-type Guard[S comparable, E comparable, D any] func(ctx context.Context, transition Transition[S, E], data D) error
+type Guard[S comparable, E comparable, D any] func(transition Transition[S, E], data D) error
 
 // Effect defines a callback function executed after a state transition has occurred.
 // It can be used for side effects like logging or triggering external actions.
@@ -222,7 +222,7 @@ func (sm *StateMachine[S, E, D]) Fire(ctx context.Context, event E, data D) erro
 	transition := Transition[S, E]{From: oldState, To: rule.Target, Event: event}
 
 	if rule.Guard != nil {
-		if err := rule.Guard(ctx, transition, data); err != nil {
+		if err := rule.Guard(transition, data); err != nil {
 			sm.mutex.Unlock()
 			return fmt.Errorf("transition guard failed: %w", err)
 		}

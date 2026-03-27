@@ -64,7 +64,7 @@ func main() {
 		}).
 		// Use a Guard to reject the transition if max retries are exceeded
 		Permit(EventSuccess, StateConnected, efsm.WithGuard(
-			func(ctx context.Context, t efsm.Transition[State, Event], d Data) error {
+			func(t efsm.Transition[State, Event], d Data) error {
 				if d.RetryCount > 3 {
 					return errors.New("max connection retries exceeded")
 				}
