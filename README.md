@@ -11,7 +11,7 @@
 - Type-safe states and events using Go generics.
 - Thread-safe state transitions powered by read-write mutexes.
 - Fluent builder pattern for clean and intuitive configuration.
-- Context-aware transition guards that support custom data payloads.
+- Transition guards that support custom data payloads.
 
 ### Quick start
 
