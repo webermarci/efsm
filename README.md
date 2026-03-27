@@ -20,13 +20,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 
 	"github.com/webermarci/efsm"
 )
 
-// Define your states and events.
+// 1. Define states and events as strongly typed aliases
 type State string
 type Event string
 
@@ -40,40 +41,69 @@ const (
 	EventSuccess    Event = "Success"
 )
 
-// Define any custom data to pass along with transitions.
+// 2. Define the generic data payload passed to hooks
 type ConnectionData struct {
 	RetryCount int
-}
-
-func guard(ctx context.Context, t efsm.Transition[State, Event], d ConnectionData) error {
-	fmt.Printf("Transitioning from %s to %s (Retries: %d)\n", t.From, t.To, d.RetryCount)
-	return nil
-}
-
-func effect(ctx context.Context, t efsm.Transition[State, Event], d ConnectionData) {
-	fmt.Printf("Effect executed for transition from %s to %s (Retries: %d)\n", t.From, t.To, d.RetryCount)
+	IPAddress  string
 }
 
 func main() {
-	sm := efsm.New[State, Event, ConnectionData](StateDisconnected).
-		Permit(StateDisconnected, EventConnect, StateConnecting).
-		Permit(StateConnecting, EventSuccess, StateConnected, efsm.WithGuard(guard)).
-		Permit(StateConnected, EventDisconnect, StateDisconnected, efsm.WithEffect(effect))
+	// Initialize the state machine with the starting state
+	sm := efsm.NewStateMachine[State, Event, ConnectionData](StateDisconnected)
 
+	// 3. Declaratively configure the state rules and transitions
+	sm.State(StateDisconnected).
+		OnEntry(func(ctx context.Context, t efsm.Transition[State, Event], d ConnectionData) {
+			fmt.Println("🔌 Hook: Device is safely disconnected.")
+		}).
+		Permit(EventConnect, StateConnecting)
+
+	sm.State(StateConnecting).
+		OnEntry(func(ctx context.Context, t efsm.Transition[State, Event], d ConnectionData) {
+			fmt.Printf("⏳ Hook: Attempting connection to %s...\n", d.IPAddress)
+		}).
+		// Use a Guard to reject the transition if max retries are exceeded
+		Permit(EventSuccess, StateConnected, efsm.WithGuard(
+			func(ctx context.Context, t efsm.Transition[State, Event], d ConnectionData) error {
+				if d.RetryCount > 3 {
+					return errors.New("max connection retries exceeded")
+				}
+				return nil
+			},
+		)).
+		// Add an effect specific to this transition
+		Permit(EventDisconnect, StateDisconnected, efsm.WithEffect(
+			func(ctx context.Context, t efsm.Transition[State, Event], d ConnectionData) {
+				fmt.Println("⚠️ Effect: Connection aborted by user.")
+			},
+		))
+
+	sm.State(StateConnected).
+		OnEntry(func(ctx context.Context, t efsm.Transition[State, Event], d ConnectionData) {
+			fmt.Println("✅ Hook: Connection established successfully!")
+		}).
+		Permit(EventDisconnect, StateDisconnected)
+
+	// 4. Execute the state machine
 	ctx := context.Background()
-	data := ConnectionData{RetryCount: 1}
+	payload := ConnectionData{RetryCount: 1, IPAddress: "192.168.1.100"}
 
-	if err := sm.Fire(ctx, EventConnect, data); err != nil {
-		log.Fatalf("Transition failed: %v", err)
-	}
-	
-	fmt.Printf("Current State: %s\n", sm.State()) // Output: Connecting
+	fmt.Printf("Initial State: %s\n", sm.CurrentState())
 
-	if err := sm.Fire(ctx, EventSuccess, data); err != nil {
-		log.Fatalf("Transition failed: %v", err)
+	// Fire: Disconnected -> Connecting
+	_ = sm.Fire(ctx, EventConnect, payload)
+	fmt.Printf("Current State: %s\n\n", sm.CurrentState())
+
+	// Fire: Connecting -> Connected (Guard passes)
+	_ = sm.Fire(ctx, EventSuccess, payload)
+	fmt.Printf("Current State: %s\n\n", sm.CurrentState())
+
+	// Test Guard failure scenario
+	badPayload := ConnectionData{RetryCount: 5, IPAddress: "192.168.1.100"}
+	err := sm.Fire(ctx, EventConnect, badPayload) // Invalid in Connected state
+	if err != nil {
+		fmt.Printf("Error: %v\n", err) // Output: event is not valid in current state: Connect in Connected
 	}
-	
-	fmt.Printf("Current State: %s\n", sm.State()) // Output: Connected
 }
 ```
 

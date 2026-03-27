@@ -31,28 +31,99 @@ type Guard[S comparable, E comparable, D any] func(ctx context.Context, transiti
 // It can be used for side effects like logging or triggering external actions.
 type Effect[S comparable, E comparable, D any] func(ctx context.Context, transition Transition[S, E], data D)
 
-// Rule defines the outcome of an event, including the target state and an optional guard.
-type Rule[S comparable, E comparable, D any] struct {
+// TransitionRule defines the outcome of an event, including the target state and an optional guard.
+type TransitionRule[S comparable, E comparable, D any] struct {
 	Target S
 	Guard  Guard[S, E, D]
 	Effect Effect[S, E, D]
 }
 
 // TransitionOption is a functional option type for configuring transition rules.
-type TransitionOption[S comparable, E comparable, D any] func(*Rule[S, E, D])
+type TransitionOption[S comparable, E comparable, D any] func(*TransitionRule[S, E, D])
 
 // WithGuard is a TransitionOption that sets a guard function for a transition rule.
-func WithGuard[S comparable, E comparable, D any](g Guard[S, E, D]) TransitionOption[S, E, D] {
-	return func(r *Rule[S, E, D]) {
-		r.Guard = g
+// Note: If multiple WithGuard options are provided for the same transition, the last one overwrites previous ones.
+func WithGuard[S comparable, E comparable, D any](guard Guard[S, E, D]) TransitionOption[S, E, D] {
+	return func(rule *TransitionRule[S, E, D]) {
+		rule.Guard = guard
 	}
 }
 
 // WithEffect is a TransitionOption that sets an effect function for a transition rule.
-func WithEffect[S comparable, E comparable, D any](e Effect[S, E, D]) TransitionOption[S, E, D] {
-	return func(r *Rule[S, E, D]) {
-		r.Effect = e
+// Note: If multiple WithEffect options are provided for the same transition, the last one overwrites previous ones.
+func WithEffect[S comparable, E comparable, D any](effect Effect[S, E, D]) TransitionOption[S, E, D] {
+	return func(rule *TransitionRule[S, E, D]) {
+		rule.Effect = effect
 	}
+}
+
+// StateBuilder provides a fluent API for configuring a specific state.
+type StateBuilder[S comparable, E comparable, D any] struct {
+	sm    *StateMachine[S, E, D]
+	state S
+}
+
+// State begins the configuration of a specific state and returns a builder for method chaining.
+func (sm *StateMachine[S, E, D]) State(state S) *StateBuilder[S, E, D] {
+	sm.mutex.Lock()
+	defer sm.mutex.Unlock()
+
+	// Ensure the transitions map exists for this state so the builder doesn't panic later
+	if _, exists := sm.transitions[state]; !exists {
+		sm.transitions[state] = make(map[E]TransitionRule[S, E, D])
+	}
+
+	return &StateBuilder[S, E, D]{
+		sm:    sm,
+		state: state,
+	}
+}
+
+// OnEntry adds an effect that runs whenever this state is entered.
+// Note: If called multiple times on the same builder, the last one overwrites previous ones.
+func (sb *StateBuilder[S, E, D]) OnEntry(effect Effect[S, E, D]) *StateBuilder[S, E, D] {
+	sb.sm.mutex.Lock()
+	defer sb.sm.mutex.Unlock()
+
+	rule := sb.sm.stateRules[sb.state]
+	rule.EntryEffect = effect
+	sb.sm.stateRules[sb.state] = rule
+
+	return sb
+}
+
+// OnExit adds an effect that runs whenever this state is exited.
+// Note: If called multiple times on the same builder, the last one overwrites previous ones.
+func (sb *StateBuilder[S, E, D]) OnExit(effect Effect[S, E, D]) *StateBuilder[S, E, D] {
+	sb.sm.mutex.Lock()
+	defer sb.sm.mutex.Unlock()
+
+	rule := sb.sm.stateRules[sb.state]
+	rule.ExitEffect = effect
+	sb.sm.stateRules[sb.state] = rule
+
+	return sb
+}
+
+// Permit defines a valid transition triggered by an event, with optional transition options.
+func (sb *StateBuilder[S, E, D]) Permit(event E, target S, opts ...TransitionOption[S, E, D]) *StateBuilder[S, E, D] {
+	sb.sm.mutex.Lock()
+	defer sb.sm.mutex.Unlock()
+
+	rule := TransitionRule[S, E, D]{Target: target}
+
+	for _, opt := range opts {
+		opt(&rule)
+	}
+
+	sb.sm.transitions[sb.state][event] = rule
+
+	return sb
+}
+
+type StateRule[S comparable, E comparable, D any] struct {
+	EntryEffect Effect[S, E, D]
+	ExitEffect  Effect[S, E, D]
 }
 
 // StateMachine is a running finite state machine instance. It is safe for
@@ -60,7 +131,8 @@ func WithEffect[S comparable, E comparable, D any](e Effect[S, E, D]) Transition
 // a write lock to serialize transitions.
 type StateMachine[S comparable, E comparable, D any] struct {
 	currentState S
-	transitions  map[S]map[E]Rule[S, E, D]
+	transitions  map[S]map[E]TransitionRule[S, E, D]
+	stateRules   map[S]StateRule[S, E, D]
 	mutex        sync.RWMutex
 }
 
@@ -68,28 +140,9 @@ type StateMachine[S comparable, E comparable, D any] struct {
 func NewStateMachine[S comparable, E comparable, D any](initial S) *StateMachine[S, E, D] {
 	return &StateMachine[S, E, D]{
 		currentState: initial,
-		transitions:  make(map[S]map[E]Rule[S, E, D]),
+		transitions:  make(map[S]map[E]TransitionRule[S, E, D]),
+		stateRules:   make(map[S]StateRule[S, E, D]),
 	}
-}
-
-// Permit defines a transition from a state to a target state triggered by an event, with optional transition options.
-func (sm *StateMachine[S, E, D]) Permit(state S, event E, target S, options ...TransitionOption[S, E, D]) *StateMachine[S, E, D] {
-	sm.mutex.Lock()
-	defer sm.mutex.Unlock()
-
-	if _, exists := sm.transitions[state]; !exists {
-		sm.transitions[state] = make(map[E]Rule[S, E, D])
-	}
-
-	rule := Rule[S, E, D]{Target: target}
-
-	for _, option := range options {
-		option(&rule)
-	}
-
-	sm.transitions[state][event] = rule
-
-	return sm
 }
 
 // CurrentState returns the current state of the machine.
@@ -142,8 +195,8 @@ func (sm *StateMachine[S, E, D]) AvailableEventsForStates() map[S][]E {
 }
 
 // Fire attempts to transition the state machine using the provided event.
-// If the matching Rule defines a Guard, it is executed synchronously. If the
-// guard returns an error the transition does not occur and the error is returned.
+// If the matching TransitionRule defines a Guard, it is executed synchronously.
+// If the guard returns an error the transition does not occur and the error is returned.
 //
 // Returns:
 //   - ErrNoTransitions if no transitions are defined for the current state.
@@ -177,11 +230,22 @@ func (sm *StateMachine[S, E, D]) Fire(ctx context.Context, event E, data D) erro
 
 	sm.currentState = rule.Target
 
-	effect := rule.Effect
+	transitionEffect := rule.Effect
+	exitEffect := sm.stateRules[oldState].ExitEffect
+	entryEffect := sm.stateRules[rule.Target].EntryEffect
+
 	sm.mutex.Unlock()
 
-	if effect != nil {
-		effect(ctx, transition, data)
+	if exitEffect != nil {
+		exitEffect(ctx, transition, data)
+	}
+
+	if transitionEffect != nil {
+		transitionEffect(ctx, transition, data)
+	}
+
+	if entryEffect != nil {
+		entryEffect(ctx, transition, data)
 	}
 
 	return nil
