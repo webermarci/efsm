@@ -1,7 +1,6 @@
 package efsm_test
 
 import (
-	"context"
 	"errors"
 	"sync"
 	"testing"
@@ -37,7 +36,7 @@ func TestStateMachine_BasicRouting(t *testing.T) {
 		t.Fatalf("expected initial state %v, got %v", StateIdle, state)
 	}
 
-	err := sm.Fire(context.Background(), EventStart, nil)
+	err := sm.Fire(EventStart, nil)
 	if err != nil {
 		t.Fatalf("unexpected error on valid transition: %v", err)
 	}
@@ -54,7 +53,7 @@ func TestStateMachine_InvalidEvent(t *testing.T) {
 
 	sm.State(StateIdle).Permit(EventStart, StateRunning)
 
-	err := sm.Fire(context.Background(), EventFail, nil)
+	err := sm.Fire(EventFail, nil)
 	if err == nil {
 		t.Fatal("expected error on invalid event, got nil")
 	}
@@ -73,7 +72,7 @@ func TestStateMachine_NoTransitionsDefined(t *testing.T) {
 
 	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
 
-	err := sm.Fire(context.Background(), EventStart, nil)
+	err := sm.Fire(EventStart, nil)
 	if err == nil {
 		t.Fatal("expected error for unconfigured state, got nil")
 	}
@@ -90,13 +89,13 @@ func TestStateMachine_OnEntry(t *testing.T) {
 
 	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
 
-	sm.State(StateRunning).OnEntry(func(ctx context.Context, transition efsm.Transition[State, Event], data *DataContext) {
+	sm.State(StateRunning).OnEntry(func(transition efsm.Transition[State, Event], data *DataContext) {
 		entryCalled = true
 	})
 
 	sm.State(StateIdle).Permit(EventStart, StateRunning)
 
-	err := sm.Fire(context.Background(), EventStart, nil)
+	err := sm.Fire(EventStart, nil)
 	if err != nil {
 		t.Fatalf("unexpected error on valid transition: %v", err)
 	}
@@ -113,13 +112,13 @@ func TestStateMachine_OnExit(t *testing.T) {
 
 	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
 
-	sm.State(StateIdle).OnExit(func(ctx context.Context, transition efsm.Transition[State, Event], data *DataContext) {
+	sm.State(StateIdle).OnExit(func(transition efsm.Transition[State, Event], data *DataContext) {
 		exitCalled = true
 	})
 
 	sm.State(StateIdle).Permit(EventStart, StateRunning)
 
-	err := sm.Fire(context.Background(), EventStart, nil)
+	err := sm.Fire(EventStart, nil)
 	if err != nil {
 		t.Fatalf("unexpected error on valid transition: %v", err)
 	}
@@ -145,7 +144,7 @@ func TestStateMachine_Guard(t *testing.T) {
 		}),
 	)
 
-	err := sm.Fire(context.Background(), EventStart, &DataContext{Retries: 5})
+	err := sm.Fire(EventStart, &DataContext{Retries: 5})
 	if err == nil {
 		t.Fatal("expected guard to fail the transition")
 	}
@@ -158,7 +157,7 @@ func TestStateMachine_Guard(t *testing.T) {
 		t.Fatalf("expected state to remain %v after failed guard, got %v", StateIdle, sm.CurrentState())
 	}
 
-	err = sm.Fire(context.Background(), EventStart, &DataContext{Retries: 1})
+	err = sm.Fire(EventStart, &DataContext{Retries: 1})
 	if err != nil {
 		t.Fatalf("expected transition to succeed, got %v", err)
 	}
@@ -176,12 +175,12 @@ func TestStateMachine_Effect(t *testing.T) {
 	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
 
 	sm.State(StateIdle).Permit(EventStart, StateRunning,
-		efsm.WithEffect(func(ctx context.Context, transition efsm.Transition[State, Event], data *DataContext) {
+		efsm.WithEffect(func(transition efsm.Transition[State, Event], data *DataContext) {
 			effectCalled = true
 		}),
 	)
 
-	err := sm.Fire(context.Background(), EventStart, nil)
+	err := sm.Fire(EventStart, nil)
 	if err != nil {
 		t.Fatalf("unexpected error on valid transition: %v", err)
 	}
@@ -206,19 +205,19 @@ func TestStateMachine_EffectExecutionOrder(t *testing.T) {
 	}
 
 	sm.State(StateIdle).
-		OnExit(func(context.Context, efsm.Transition[State, Event], *DataContext) {
+		OnExit(func(efsm.Transition[State, Event], *DataContext) {
 			record("exit_idle")
 		}).
-		Permit(EventStart, StateRunning, efsm.WithEffect(func(context.Context, efsm.Transition[State, Event], *DataContext) {
+		Permit(EventStart, StateRunning, efsm.WithEffect(func(efsm.Transition[State, Event], *DataContext) {
 			record("transition_start")
 		}))
 
 	sm.State(StateRunning).
-		OnEntry(func(context.Context, efsm.Transition[State, Event], *DataContext) {
+		OnEntry(func(efsm.Transition[State, Event], *DataContext) {
 			record("entry_running")
 		})
 
-	err := sm.Fire(context.Background(), EventStart, nil)
+	err := sm.Fire(EventStart, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -367,7 +366,7 @@ func TestStateMachine_Concurrency(t *testing.T) {
 					targetEvent = 0
 				}
 
-				_ = sm.Fire(context.Background(), targetEvent, nil)
+				_ = sm.Fire(targetEvent, nil)
 			}
 		})
 	}
@@ -381,11 +380,9 @@ func BenchmarkStateMachine_Fire(b *testing.B) {
 	sm.State(0).Permit(1, 1)
 	sm.State(1).Permit(0, 0)
 
-	ctx := context.Background()
-
 	for i := 0; b.Loop(); i++ {
 		event := i % 2
-		_ = sm.Fire(ctx, event, nil)
+		_ = sm.Fire(event, nil)
 	}
 }
 
@@ -406,8 +403,6 @@ func BenchmarkStateMachine_Fire_Parallel(b *testing.B) {
 	sm.State(0).Permit(1, 1)
 	sm.State(1).Permit(0, 0)
 
-	ctx := context.Background()
-
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
@@ -416,7 +411,7 @@ func BenchmarkStateMachine_Fire_Parallel(b *testing.B) {
 			if st == 1 {
 				target = 0
 			}
-			_ = sm.Fire(ctx, target, nil)
+			_ = sm.Fire(target, nil)
 		}
 	})
 }

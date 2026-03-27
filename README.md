@@ -53,13 +53,13 @@ func main() {
 
 	// 3. Declaratively configure the state rules and transitions
 	sm.State(StateDisconnected).
-		OnEntry(func(ctx context.Context, t efsm.Transition[State, Event], d Data) {
+		OnEntry(func(t efsm.Transition[State, Event], d Data) {
 			fmt.Println("🔌 Hook: Device is safely disconnected.")
 		}).
 		Permit(EventConnect, StateConnecting)
 
 	sm.State(StateConnecting).
-		OnEntry(func(ctx context.Context, t efsm.Transition[State, Event], d Data) {
+		OnEntry(func(t efsm.Transition[State, Event], d Data) {
 			fmt.Printf("⏳ Hook: Attempting connection to %s...\n", d.IPAddress)
 		}).
 		// Use a Guard to reject the transition if max retries are exceeded
@@ -73,34 +73,33 @@ func main() {
 		)).
 		// Add an effect specific to this transition
 		Permit(EventDisconnect, StateDisconnected, efsm.WithEffect(
-			func(ctx context.Context, t efsm.Transition[State, Event], d Data) {
+			func(t efsm.Transition[State, Event], d Data) {
 				fmt.Println("⚠️ Effect: Connection aborted by user.")
 			},
 		))
 
 	sm.State(StateConnected).
-		OnEntry(func(ctx context.Context, t efsm.Transition[State, Event], d Data) {
+		OnEntry(func(t efsm.Transition[State, Event], d Data) {
 			fmt.Println("✅ Hook: Connection established successfully!")
 		}).
 		Permit(EventDisconnect, StateDisconnected)
 
 	// 4. Execute the state machine
-	ctx := context.Background()
 	payload := Data{RetryCount: 1, IPAddress: "192.168.1.100"}
 
 	fmt.Printf("Initial State: %s\n", sm.CurrentState())
 
 	// Fire: Disconnected -> Connecting
-	_ = sm.Fire(ctx, EventConnect, payload)
+	_ = sm.Fire(EventConnect, payload)
 	fmt.Printf("Current State: %s\n\n", sm.CurrentState())
 
 	// Fire: Connecting -> Connected (Guard passes)
-	_ = sm.Fire(ctx, EventSuccess, payload)
+	_ = sm.Fire(EventSuccess, payload)
 	fmt.Printf("Current State: %s\n\n", sm.CurrentState())
 
 	// Test Guard failure scenario
 	badPayload := Data{RetryCount: 5, IPAddress: "192.168.1.100"}
-	err := sm.Fire(ctx, EventConnect, badPayload) // Invalid in Connected state
+	err := sm.Fire(EventConnect, badPayload) // Invalid in Connected state
 	if err != nil {
 		// Output: event is not valid in current state: Connect in Connected
 		fmt.Printf("Error: %v\n", err)

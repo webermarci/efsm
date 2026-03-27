@@ -1,7 +1,6 @@
 package efsm
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -29,7 +28,7 @@ type Guard[S comparable, E comparable, D any] func(transition Transition[S, E], 
 
 // Effect defines a callback function executed after a state transition has occurred.
 // It can be used for side effects like logging or triggering external actions.
-type Effect[S comparable, E comparable, D any] func(ctx context.Context, transition Transition[S, E], data D)
+type Effect[S comparable, E comparable, D any] func(transition Transition[S, E], data D)
 
 // TransitionRule defines the outcome of an event, including the target state and an optional guard.
 type TransitionRule[S comparable, E comparable, D any] struct {
@@ -202,7 +201,7 @@ func (sm *StateMachine[S, E, D]) AvailableEventsForStates() map[S][]E {
 //   - ErrNoTransitions if no transitions are defined for the current state.
 //   - ErrInvalidEvent if the supplied event is not valid for the current state.
 //   - Wrapped error if the guard fails.
-func (sm *StateMachine[S, E, D]) Fire(ctx context.Context, event E, data D) error {
+func (sm *StateMachine[S, E, D]) Fire(event E, data D) error {
 	sm.mutex.Lock()
 
 	oldState := sm.currentState
@@ -237,15 +236,15 @@ func (sm *StateMachine[S, E, D]) Fire(ctx context.Context, event E, data D) erro
 	sm.mutex.Unlock()
 
 	if exitEffect != nil {
-		exitEffect(ctx, transition, data)
+		exitEffect(transition, data)
 	}
 
 	if transitionEffect != nil {
-		transitionEffect(ctx, transition, data)
+		transitionEffect(transition, data)
 	}
 
 	if entryEffect != nil {
-		entryEffect(ctx, transition, data)
+		entryEffect(transition, data)
 	}
 
 	return nil
