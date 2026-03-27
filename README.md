@@ -50,11 +50,15 @@ func guard(ctx context.Context, t efsm.Transition[State, Event], d ConnectionDat
 	return nil
 }
 
+func effect(ctx context.Context, t efsm.Transition[State, Event], d ConnectionData) {
+	fmt.Printf("Effect executed for transition from %s to %s (Retries: %d)\n", t.From, t.To, d.RetryCount)
+}
+
 func main() {
 	sm := efsm.New[State, Event, ConnectionData](StateDisconnected).
 		Permit(StateDisconnected, EventConnect, StateConnecting).
 		Permit(StateConnecting, EventSuccess, StateConnected, efsm.WithGuard(guard)).
-		Permit(StateConnected, EventDisconnect, StateDisconnected)
+		Permit(StateConnected, EventDisconnect, StateDisconnected, efsm.WithEffect(effect))
 
 	ctx := context.Background()
 	data := ConnectionData{RetryCount: 1}
