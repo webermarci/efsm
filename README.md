@@ -45,19 +45,15 @@ type ConnectionData struct {
 	RetryCount int
 }
 
+func guard(ctx context.Context, t efsm.Transition[State, Event], d ConnectionData) error {
+	fmt.Printf("Transitioning from %s to %s (Retries: %d)\n", t.From, t.To, d.RetryCount)
+	return nil
+}
+
 func main() {
 	sm := efsm.New[State, Event, ConnectionData](StateDisconnected).
 		Permit(StateDisconnected, EventConnect, StateConnecting).
-		PermitWithGuard(
-			StateConnecting,
-			EventSuccess,
-			StateConnected,
-			func(ctx context.Context, t efsm.Transition[State, Event], d ConnectionData) error {
-				fmt.Printf("Transitioning from %s to %s (Retries: %d)\n",
-					t.From, t.To, d.RetryCount)
-        return nil
-			}
-		).
+		PermitWithGuard(StateConnecting, EventSuccess, StateConnected, guard).
 	  Permit(StateConnected, EventDisconnect, StateDisconnected)
 
 	ctx := context.Background()
