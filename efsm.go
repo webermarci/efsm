@@ -32,9 +32,11 @@ type Effect[S comparable, E comparable, D any] func(transition Transition[S, E],
 
 // TransitionRule defines the outcome of an event, including the target state and an optional guard.
 type TransitionRule[S comparable, E comparable, D any] struct {
-	Target S
-	Guard  Guard[S, E, D]
-	Effect Effect[S, E, D]
+	target      S
+	boxedTarget any
+	targetNode  *stateData[S, E, D]
+	guard       Guard[S, E, D]
+	effect      Effect[S, E, D]
 }
 
 // TransitionOption is a functional option type for configuring transition rules.
@@ -44,7 +46,7 @@ type TransitionOption[S comparable, E comparable, D any] func(*TransitionRule[S,
 // Note: If multiple WithGuard options are provided for the same transition, the last one overwrites previous ones.
 func WithGuard[S comparable, E comparable, D any](guard Guard[S, E, D]) TransitionOption[S, E, D] {
 	return func(rule *TransitionRule[S, E, D]) {
-		rule.Guard = guard
+		rule.guard = guard
 	}
 }
 
@@ -52,7 +54,7 @@ func WithGuard[S comparable, E comparable, D any](guard Guard[S, E, D]) Transiti
 // Note: If multiple OnTransition options are provided for the same transition, the last one overwrites previous ones.
 func OnTransition[S comparable, E comparable, D any](effect Effect[S, E, D]) TransitionOption[S, E, D] {
 	return func(rule *TransitionRule[S, E, D]) {
-		rule.Effect = effect
+		rule.effect = effect
 	}
 }
 
@@ -76,14 +78,8 @@ func (sb StateBuilder[S, E, D]) OnEntry(effect Effect[S, E, D]) StateBuilder[S, 
 	sb.sm.mutex.Lock()
 	defer sb.sm.mutex.Unlock()
 
-	data := sb.sm.states[sb.state]
-	data.entryEffect = effect
-	sb.sm.states[sb.state] = data
-
-	if sb.state == sb.sm.innerState {
-		sb.sm.active = data
-	}
-
+	node := sb.sm.getOrCreateNode(sb.state)
+	node.entryEffect = effect
 	return sb
 }
 
@@ -93,14 +89,8 @@ func (sb StateBuilder[S, E, D]) OnExit(effect Effect[S, E, D]) StateBuilder[S, E
 	sb.sm.mutex.Lock()
 	defer sb.sm.mutex.Unlock()
 
-	data := sb.sm.states[sb.state]
-	data.exitEffect = effect
-	sb.sm.states[sb.state] = data
-
-	if sb.state == sb.sm.innerState {
-		sb.sm.active = data
-	}
-
+	node := sb.sm.getOrCreateNode(sb.state)
+	node.exitEffect = effect
 	return sb
 }
 
@@ -109,21 +99,23 @@ func (sb StateBuilder[S, E, D]) Permit(event E, target S, opts ...TransitionOpti
 	sb.sm.mutex.Lock()
 	defer sb.sm.mutex.Unlock()
 
-	rule := TransitionRule[S, E, D]{Target: target}
+	targetNode := sb.sm.getOrCreateNode(target)
+
+	rule := TransitionRule[S, E, D]{
+		target:      target,
+		boxedTarget: any(target),
+		targetNode:  targetNode,
+	}
+
 	for _, opt := range opts {
 		opt(&rule)
 	}
 
-	data := sb.sm.states[sb.state]
-	if data.transitions == nil {
-		data.transitions = make(map[E]TransitionRule[S, E, D])
+	sourceNode := sb.sm.getOrCreateNode(sb.state)
+	if sourceNode.transitions == nil {
+		sourceNode.transitions = make(map[E]TransitionRule[S, E, D])
 	}
-	data.transitions[event] = rule
-	sb.sm.states[sb.state] = data
-
-	if sb.state == sb.sm.innerState {
-		sb.sm.active = data
-	}
+	sourceNode.transitions[event] = rule
 
 	return sb
 }
@@ -138,22 +130,35 @@ type stateData[S comparable, E comparable, D any] struct {
 // concurrent use. CurrentState provides 100% lock-free reads, while Fire and
 // builder methods use a mutex to safely serialize transitions and map mutations.
 type StateMachine[S comparable, E comparable, D any] struct {
-	innerState   S
 	currentState atomic.Value
 	_            [64]byte
-	active       stateData[S, E, D]
-	states       map[S]stateData[S, E, D]
-	mutex        sync.Mutex
+
+	mutex      sync.Mutex
+	innerState S
+	active     *stateData[S, E, D]
+
+	states map[S]*stateData[S, E, D]
 }
 
 // NewStateMachine creates a new StateMachine with the specified initial state.
 func NewStateMachine[S comparable, E comparable, D any](initial S) *StateMachine[S, E, D] {
+	boxedInitial := any(initial)
 	sm := &StateMachine[S, E, D]{
-		states:     make(map[S]stateData[S, E, D]),
 		innerState: initial,
+		states:     make(map[S]*stateData[S, E, D]),
 	}
-	sm.currentState.Store(initial)
+	sm.active = sm.getOrCreateNode(initial)
+	sm.currentState.Store(boxedInitial)
 	return sm
+}
+
+func (sm *StateMachine[S, E, D]) getOrCreateNode(state S) *stateData[S, E, D] {
+	node, exists := sm.states[state]
+	if !exists {
+		node = &stateData[S, E, D]{}
+		sm.states[state] = node
+	}
+	return node
 }
 
 // CurrentState returns the current state of the machine.
@@ -166,9 +171,11 @@ func (sm *StateMachine[S, E, D]) AvailableStates() []S {
 	sm.mutex.Lock()
 	defer sm.mutex.Unlock()
 
-	states := make([]S, 0, len(sm.states))
-	for state := range sm.states {
-		states = append(states, state)
+	var states []S
+	for state, node := range sm.states {
+		if len(node.transitions) > 0 {
+			states = append(states, state)
+		}
 	}
 	return states
 }
@@ -192,10 +199,14 @@ func (sm *StateMachine[S, E, D]) AvailableEventsForStates() map[S][]E {
 	sm.mutex.Lock()
 	defer sm.mutex.Unlock()
 
-	eventsForStates := make(map[S][]E, len(sm.states))
-	for state, data := range sm.states {
-		events := make([]E, 0, len(data.transitions))
-		for event := range data.transitions {
+	eventsForStates := make(map[S][]E)
+	for state, node := range sm.states {
+		if len(node.transitions) == 0 {
+			continue
+		}
+
+		events := make([]E, 0, len(node.transitions))
+		for event := range node.transitions {
 			events = append(events, event)
 		}
 		eventsForStates[state] = events
@@ -214,44 +225,36 @@ func (sm *StateMachine[S, E, D]) AvailableEventsForStates() map[S][]E {
 func (sm *StateMachine[S, E, D]) Fire(event E, data D) error {
 	sm.mutex.Lock()
 
-	oldState := sm.innerState
-	currentData := sm.active
+	currentNode := sm.active
 
-	if currentData.transitions == nil {
+	if currentNode.transitions == nil {
 		sm.mutex.Unlock()
 		return ErrNoTransitions
 	}
 
-	rule, validEvent := currentData.transitions[event]
+	rule, validEvent := currentNode.transitions[event]
 	if !validEvent {
 		sm.mutex.Unlock()
 		return ErrInvalidEvent
 	}
 
-	transition := Transition[S, E]{From: oldState, To: rule.Target, Event: event}
+	transition := Transition[S, E]{From: sm.innerState, To: rule.target, Event: event}
 
-	if rule.Guard != nil {
-		if err := rule.Guard(transition, data); err != nil {
+	if rule.guard != nil {
+		if err := rule.guard(transition, data); err != nil {
 			sm.mutex.Unlock()
 			return err
 		}
 	}
 
-	sm.innerState = rule.Target
-	sm.currentState.Store(rule.Target)
+	sm.innerState = rule.target
+	sm.currentState.Store(rule.boxedTarget)
 
-	var targetData stateData[S, E, D]
-	if rule.Target == oldState {
-		targetData = currentData
-	} else {
-		targetData = sm.states[rule.Target]
-	}
+	sm.active = rule.targetNode
 
-	sm.active = targetData
-
-	exitEffect := currentData.exitEffect
-	transitionEffect := rule.Effect
-	entryEffect := targetData.entryEffect
+	exitEffect := currentNode.exitEffect
+	transitionEffect := rule.effect
+	entryEffect := rule.targetNode.entryEffect
 
 	sm.mutex.Unlock()
 

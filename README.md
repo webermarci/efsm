@@ -6,10 +6,12 @@
 
 `efsm` is a generic, thread-safe, extended finite state machine (FSM) for Go. It provides a fluent builder API to define states, events, and transition guards, making it easy to model complex logic safely in concurrent environments.
 
+It is relentlessly optimized for high-throughput, highly concurrent environments. It features a zero-allocation pointer-graph architecture, 100% lock-free reads, and CPU cache-line padding to prevent false sharing.
+
 ### Features
 
 - Type-safe states and events using Go generics.
-- Thread-safe state transitions powered by read-write mutexes.
+- Thread-safe state transitions with 100% lock-free reads and mutually exclusive writes.
 - Fluent builder pattern for clean and intuitive configuration.
 - Transition guards that support custom data payloads.
 
@@ -19,10 +21,8 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
-	"log"
 
 	"github.com/webermarci/efsm"
 )
