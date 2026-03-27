@@ -29,12 +29,8 @@ type DataContext struct {
 func TestStateMachine_BasicRouting(t *testing.T) {
 	t.Parallel()
 
-	builder := efsm.NewBuilder[State, Event, *DataContext](StateIdle)
-
-	builder.Configure(StateIdle).
-		Permit(EventStart, StateRunning)
-
-	sm := builder.Build()
+	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle).
+		Permit(StateIdle, EventStart, StateRunning)
 
 	if state := sm.State(); state != StateIdle {
 		t.Fatalf("expected initial state %v, got %v", StateIdle, state)
@@ -53,9 +49,8 @@ func TestStateMachine_BasicRouting(t *testing.T) {
 func TestStateMachine_InvalidEvent(t *testing.T) {
 	t.Parallel()
 
-	builder := efsm.NewBuilder[State, Event, any](StateIdle)
-	builder.Configure(StateIdle).Permit(EventStart, StateRunning)
-	sm := builder.Build()
+	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle).
+		Permit(StateIdle, EventStart, StateRunning)
 
 	err := sm.Fire(context.Background(), EventFail, nil)
 	if err == nil {
@@ -73,8 +68,8 @@ func TestStateMachine_InvalidEvent(t *testing.T) {
 
 func TestStateMachine_NoTransitionsDefined(t *testing.T) {
 	t.Parallel()
-	builder := efsm.NewBuilder[State, Event, any](StateIdle)
-	sm := builder.Build()
+
+	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
 
 	err := sm.Fire(context.Background(), EventStart, nil)
 	if err == nil {
@@ -86,33 +81,25 @@ func TestStateMachine_NoTransitionsDefined(t *testing.T) {
 	}
 }
 
-func TestStateMachine_GuardAction(t *testing.T) {
+func TestStateMachine_Guard(t *testing.T) {
 	t.Parallel()
 
-	builder := efsm.NewBuilder[State, Event, *DataContext](StateIdle)
+	errGuardFailed := errors.New("too many retries")
 
-	errActionFailed := errors.New("too many retries")
-
-	builder.Configure(StateIdle).
-		PermitWithAction(
-			EventStart,
-			StateRunning,
-			func(ctx context.Context, transition efsm.Transition[State, Event], data *DataContext) error {
-				if data.Retries >= 3 {
-					return errActionFailed
-				}
-				return nil
-			},
-		)
-
-	sm := builder.Build()
+	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle).
+		PermitWithGuard(StateIdle, EventStart, StateRunning, func(ctx context.Context, transition efsm.Transition[State, Event], data *DataContext) error {
+			if data.Retries >= 3 {
+				return errGuardFailed
+			}
+			return nil
+		})
 
 	err := sm.Fire(context.Background(), EventStart, &DataContext{Retries: 5})
 	if err == nil {
-		t.Fatal("expected guard action to fail the transition")
+		t.Fatal("expected guard to fail the transition")
 	}
 
-	if !errors.Is(err, errActionFailed) {
+	if !errors.Is(err, errGuardFailed) {
 		t.Fatalf("expected specific guard error, got %v", err)
 	}
 
@@ -133,12 +120,9 @@ func TestStateMachine_GuardAction(t *testing.T) {
 func TestStateMachine_AvailableStates(t *testing.T) {
 	t.Parallel()
 
-	builder := efsm.NewBuilder[State, Event, any](StateIdle)
-	builder.Configure(StateIdle).
-		Permit(EventStart, StateRunning).
-		Permit(EventFail, StateError)
-
-	sm := builder.Build()
+	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle).
+		Permit(StateIdle, EventStart, StateRunning).
+		Permit(StateIdle, EventFail, StateError)
 
 	states := sm.AvailableStates()
 	if len(states) != 1 {
@@ -153,8 +137,7 @@ func TestStateMachine_AvailableStates(t *testing.T) {
 func TestStateMachine_AvailableEvents_Empty(t *testing.T) {
 	t.Parallel()
 
-	builder := efsm.NewBuilder[State, Event, any](StateIdle)
-	sm := builder.Build()
+	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
 
 	events := sm.AvailableEvents()
 	if len(events) != 0 {
@@ -165,12 +148,9 @@ func TestStateMachine_AvailableEvents_Empty(t *testing.T) {
 func TestStateMachine_AvailableEvents(t *testing.T) {
 	t.Parallel()
 
-	builder := efsm.NewBuilder[State, Event, any](StateIdle)
-	builder.Configure(StateIdle).
-		Permit(EventStart, StateRunning).
-		Permit(EventFail, StateError)
-
-	sm := builder.Build()
+	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle).
+		Permit(StateIdle, EventStart, StateRunning).
+		Permit(StateIdle, EventFail, StateError)
 
 	events := sm.AvailableEvents()
 	if len(events) != 2 {
@@ -197,8 +177,7 @@ func TestStateMachine_AvailableEvents(t *testing.T) {
 func TestStateMachine_AvaliableEvents_Empty(t *testing.T) {
 	t.Parallel()
 
-	builder := efsm.NewBuilder[State, Event, any](StateIdle)
-	sm := builder.Build()
+	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
 
 	eventsForStates := sm.AvaliableEventsForStates()
 	if len(eventsForStates) != 0 {
@@ -209,15 +188,10 @@ func TestStateMachine_AvaliableEvents_Empty(t *testing.T) {
 func TestStateMachine_AvailableEventsForStates(t *testing.T) {
 	t.Parallel()
 
-	builder := efsm.NewBuilder[State, Event, any](StateIdle)
-	builder.Configure(StateIdle).
-		Permit(EventStart, StateRunning).
-		Permit(EventFail, StateError)
-
-	builder.Configure(StateRunning).
-		Permit(EventReset, StateIdle)
-
-	sm := builder.Build()
+	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle).
+		Permit(StateIdle, EventStart, StateRunning).
+		Permit(StateIdle, EventFail, StateError).
+		Permit(StateRunning, EventReset, StateIdle)
 
 	eventsForStates := sm.AvaliableEventsForStates()
 
@@ -243,8 +217,7 @@ func TestStateMachine_AvailableEventsForStates(t *testing.T) {
 func TestStateMachine_AvailableEventsForStates_Empty(t *testing.T) {
 	t.Parallel()
 
-	builder := efsm.NewBuilder[State, Event, any](StateIdle)
-	sm := builder.Build()
+	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
 
 	eventsForStates := sm.AvaliableEventsForStates()
 	if len(eventsForStates) != 0 {
@@ -255,11 +228,9 @@ func TestStateMachine_AvailableEventsForStates_Empty(t *testing.T) {
 func TestStateMachine_Concurrency(t *testing.T) {
 	t.Parallel()
 
-	builder := efsm.NewBuilder[int, int, any](0)
-
-	builder.Configure(0).Permit(1, 1)
-	builder.Configure(1).Permit(0, 0)
-	sm := builder.Build()
+	sm := efsm.NewStateMachine[int, int, any](0).
+		Permit(0, 1, 1).
+		Permit(1, 0, 0)
 
 	var wg sync.WaitGroup
 	workers := 100
@@ -284,10 +255,9 @@ func TestStateMachine_Concurrency(t *testing.T) {
 }
 
 func BenchmarkStateMachine_Fire(b *testing.B) {
-	builder := efsm.NewBuilder[int, int, any](0)
-	builder.Configure(0).Permit(1, 1)
-	builder.Configure(1).Permit(0, 0)
-	sm := builder.Build()
+	sm := efsm.NewStateMachine[int, int, any](0).
+		Permit(0, 1, 1).
+		Permit(1, 0, 0)
 
 	ctx := context.Background()
 
@@ -298,8 +268,7 @@ func BenchmarkStateMachine_Fire(b *testing.B) {
 }
 
 func BenchmarkStateMachine_State_Parallel(b *testing.B) {
-	builder := efsm.NewBuilder[int, int, any](0)
-	sm := builder.Build()
+	sm := efsm.NewStateMachine[int, int, any](0)
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
@@ -310,10 +279,9 @@ func BenchmarkStateMachine_State_Parallel(b *testing.B) {
 }
 
 func BenchmarkStateMachine_Fire_Parallel(b *testing.B) {
-	builder := efsm.NewBuilder[int, int, any](0)
-	builder.Configure(0).Permit(1, 1)
-	builder.Configure(1).Permit(0, 0)
-	sm := builder.Build()
+	sm := efsm.NewStateMachine[int, int, any](0).
+		Permit(0, 1, 1).
+		Permit(1, 0, 0)
 
 	ctx := context.Background()
 

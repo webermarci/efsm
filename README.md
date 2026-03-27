@@ -4,14 +4,14 @@
 [![Test](https://github.com/webermarci/efsm/actions/workflows/test.yml/badge.svg)](https://github.com/webermarci/efsm/actions/workflows/test.yml)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-`efsm` is a generic, thread-safe, extended finite state machine (FSM) for Go. It provides a fluent builder API to define states, events, and transition actions, making it easy to model complex logic safely in concurrent environments.
+`efsm` is a generic, thread-safe, extended finite state machine (FSM) for Go. It provides a fluent builder API to define states, events, and transition guards, making it easy to model complex logic safely in concurrent environments.
 
 ### Features
 
 - Type-safe states and events using Go generics.
 - Thread-safe state transitions powered by read-write mutexes.
 - Fluent builder pattern for clean and intuitive configuration.
-- Context-aware transition actions that support custom data payloads.
+- Context-aware transition guards that support custom data payloads.
 
 ### Quick start
 
@@ -23,7 +23,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/yourusername/efsm"
+	"github.com/webermarci/efsm"
 )
 
 // Define your states and events.
@@ -46,26 +46,19 @@ type ConnectionData struct {
 }
 
 func main() {
-	builder := efsm.NewBuilder[State, Event, ConnectionData](StateDisconnected)
-
-	builder.Configure(StateDisconnected).
-		Permit(EventConnect, StateConnecting)
-
-	builder.Configure(StateConnecting).
-		PermitWithAction(
+	sm := efsm.New[State, Event, ConnectionData](StateDisconnected).
+		Permit(StateDisconnected, EventConnect, StateConnecting).
+		PermitWithGuard(
+			StateConnecting,
 			EventSuccess,
 			StateConnected,
 			func(ctx context.Context, transition efsm.Transition[State, Event], data ConnectionData) error {
-				fmt.Printf("Transitioning from %s to %s (Retries: %d)\n", transition.From, transition.To, data.RetryCount)
-				return nil
+				fmt.Printf("Transitioning from %s to %s (Retries: %d)\n",
+					transition.From, transition.To, data.RetryCount)
+        return nil
 			}
 		).
-		Permit(EventDisconnect, StateDisconnected)
-
-	builder.Configure(StateConnected).
-		Permit(EventDisconnect, StateDisconnected)
-
-	sm := builder.Build()
+	  Permit(StateConnected, EventDisconnect, StateDisconnected)
 
 	ctx := context.Background()
 	data := ConnectionData{RetryCount: 1}

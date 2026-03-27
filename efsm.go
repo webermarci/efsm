@@ -24,13 +24,13 @@ type Transition[S comparable, E comparable] struct {
 	Event E
 }
 
-// Action defines a callback function executed during a state transition.
-type Action[S comparable, E comparable, D any] func(ctx context.Context, transition Transition[S, E], data D) error
+// Guard defines a callback function executed during a state transition.
+type Guard[S comparable, E comparable, D any] func(ctx context.Context, transition Transition[S, E], data D) error
 
-// Rule defines the outcome of an event, including the target state and an optional action.
+// Rule defines the outcome of an event, including the target state and an optional guard.
 type Rule[S comparable, E comparable, D any] struct {
 	Target S
-	Action Action[S, E, D]
+	Guard  Guard[S, E, D]
 }
 
 // StateMachine is a running finite state machine instance. It is safe for
@@ -40,6 +40,40 @@ type StateMachine[S comparable, E comparable, D any] struct {
 	currentState S
 	transitions  map[S]map[E]Rule[S, E, D]
 	mutex        sync.RWMutex
+}
+
+// NewStateMachine creates a new StateMachine with the specified initial state.
+func NewStateMachine[S comparable, E comparable, D any](initial S) *StateMachine[S, E, D] {
+	return &StateMachine[S, E, D]{
+		currentState: initial,
+		transitions:  make(map[S]map[E]Rule[S, E, D]),
+	}
+}
+
+// Permit defines a transition from a state to a target state triggered by an event, without a guard.
+func (sm *StateMachine[S, E, D]) Permit(state S, event E, target S) *StateMachine[S, E, D] {
+	sm.mutex.Lock()
+	defer sm.mutex.Unlock()
+
+	if _, exists := sm.transitions[state]; !exists {
+		sm.transitions[state] = make(map[E]Rule[S, E, D])
+	}
+	sm.transitions[state][event] = Rule[S, E, D]{Target: target, Guard: nil}
+
+	return sm
+}
+
+// PermitWithGuard defines a transition from a state to a target state triggered by an event, with an associated guard.
+func (sm *StateMachine[S, E, D]) PermitWithGuard(state S, event E, target S, guard Guard[S, E, D]) *StateMachine[S, E, D] {
+	sm.mutex.Lock()
+	defer sm.mutex.Unlock()
+
+	if _, exists := sm.transitions[state]; !exists {
+		sm.transitions[state] = make(map[E]Rule[S, E, D])
+	}
+	sm.transitions[state][event] = Rule[S, E, D]{Target: target, Guard: guard}
+
+	return sm
 }
 
 // State returns the current state of the machine.
@@ -92,13 +126,13 @@ func (sm *StateMachine[S, E, D]) AvaliableEventsForStates() map[S][]E {
 }
 
 // Fire attempts to transition the state machine using the provided event.
-// If the matching Rule defines an Action, it is executed synchronously. If the
-// action returns an error the transition does not occur and the error is returned.
+// If the matching Rule defines a Guard, it is executed synchronously. If the
+// guard returns an error the transition does not occur and the error is returned.
 //
 // Returns:
 //   - ErrNoTransitions if no transitions are defined for the current state.
 //   - ErrInvalidEvent if the supplied event is not valid for the current state.
-//   - Wrapped error if the action fails.
+//   - Wrapped error if the guard fails.
 func (sm *StateMachine[S, E, D]) Fire(ctx context.Context, event E, data D) error {
 	sm.mutex.Lock()
 	defer sm.mutex.Unlock()
@@ -115,66 +149,13 @@ func (sm *StateMachine[S, E, D]) Fire(ctx context.Context, event E, data D) erro
 		return fmt.Errorf("%w: %v in %v", ErrInvalidEvent, event, oldState)
 	}
 
-	if rule.Action != nil {
+	if rule.Guard != nil {
 		transition := Transition[S, E]{From: oldState, To: rule.Target, Event: event}
-		if err := rule.Action(ctx, transition, data); err != nil {
-			return fmt.Errorf("transition action failed: %w", err)
+		if err := rule.Guard(ctx, transition, data); err != nil {
+			return fmt.Errorf("transition guard failed: %w", err)
 		}
 	}
 
 	sm.currentState = rule.Target
 	return nil
-}
-
-// Builder helps configure the state machine before it is built.
-type Builder[S comparable, E comparable, D any] struct {
-	initialState S
-	transitions  map[S]map[E]Rule[S, E, D]
-}
-
-// NewBuilder returns a new Builder with the given initial state.
-func NewBuilder[S comparable, E comparable, D any](initial S) *Builder[S, E, D] {
-	return &Builder[S, E, D]{
-		initialState: initial,
-		transitions:  make(map[S]map[E]Rule[S, E, D]),
-	}
-}
-
-// Configure prepares the builder to accept transition rules for `state` and
-// returns a `StateBuilder` for fluently declaring rules.
-func (b *Builder[S, E, D]) Configure(state S) *StateBuilder[S, E, D] {
-	if _, exists := b.transitions[state]; !exists {
-		b.transitions[state] = make(map[E]Rule[S, E, D])
-	}
-	return &StateBuilder[S, E, D]{
-		builder: b,
-		state:   state,
-	}
-}
-
-// Build finalizes the configuration and returns a `StateMachine`.
-func (b *Builder[S, E, D]) Build() *StateMachine[S, E, D] {
-	return &StateMachine[S, E, D]{
-		currentState: b.initialState,
-		transitions:  b.transitions,
-	}
-}
-
-// StateBuilder configures rules for a single state.
-type StateBuilder[S comparable, E comparable, D any] struct {
-	builder *Builder[S, E, D]
-	state   S
-}
-
-// Permit adds a transition for `event` that targets `target` without an action.
-func (sb *StateBuilder[S, E, D]) Permit(event E, target S) *StateBuilder[S, E, D] {
-	sb.builder.transitions[sb.state][event] = Rule[S, E, D]{Target: target}
-	return sb
-}
-
-// PermitWithAction adds a transition for `event` that targets `target` and
-// executes `action` when the event is fired.
-func (sb *StateBuilder[S, E, D]) PermitWithAction(event E, target S, action Action[S, E, D]) *StateBuilder[S, E, D] {
-	sb.builder.transitions[sb.state][event] = Rule[S, E, D]{Target: target, Action: action}
-	return sb
 }
