@@ -48,9 +48,9 @@ func WithGuard[S comparable, E comparable, D any](guard Guard[S, E, D]) Transiti
 	}
 }
 
-// WithEffect is a TransitionOption that sets an effect function for a transition rule.
-// Note: If multiple WithEffect options are provided for the same transition, the last one overwrites previous ones.
-func WithEffect[S comparable, E comparable, D any](effect Effect[S, E, D]) TransitionOption[S, E, D] {
+// OnTransition is a TransitionOption that sets an effect function for a transition rule.
+// Note: If multiple OnTransition options are provided for the same transition, the last one overwrites previous ones.
+func OnTransition[S comparable, E comparable, D any](effect Effect[S, E, D]) TransitionOption[S, E, D] {
 	return func(rule *TransitionRule[S, E, D]) {
 		rule.Effect = effect
 	}

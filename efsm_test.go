@@ -175,7 +175,7 @@ func TestStateMachine_Effect(t *testing.T) {
 	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
 
 	sm.State(StateIdle).Permit(EventStart, StateRunning,
-		efsm.WithEffect(func(transition efsm.Transition[State, Event], data *DataContext) {
+		efsm.OnTransition(func(transition efsm.Transition[State, Event], data *DataContext) {
 			effectCalled = true
 		}),
 	)
@@ -208,7 +208,7 @@ func TestStateMachine_EffectExecutionOrder(t *testing.T) {
 		OnExit(func(efsm.Transition[State, Event], *DataContext) {
 			record("exit_idle")
 		}).
-		Permit(EventStart, StateRunning, efsm.WithEffect(func(efsm.Transition[State, Event], *DataContext) {
+		Permit(EventStart, StateRunning, efsm.OnTransition(func(efsm.Transition[State, Event], *DataContext) {
 			record("transition_start")
 		}))
 

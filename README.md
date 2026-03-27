@@ -72,7 +72,7 @@ func main() {
 			},
 		)).
 		// Add an effect specific to this transition
-		Permit(EventDisconnect, StateDisconnected, efsm.WithEffect(
+		Permit(EventDisconnect, StateDisconnected, efsm.OnTransition(
 			func(t efsm.Transition[State, Event], d Data) {
 				fmt.Println("⚠️ Effect: Connection aborted by user.")
 			},
