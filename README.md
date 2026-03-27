@@ -83,3 +83,15 @@ func main() {
 	fmt.Printf("Current State: %s\n", sm.State()) // Output: Connected
 }
 ```
+
+### Benchmark
+
+```bash
+goos: darwin
+goarch: arm64
+pkg: github.com/webermarci/efsm
+cpu: Apple M5
+BenchmarkStateMachine_Fire-10                   150355484                7.76 ns/op            0 B/op        0 allocs/op
+BenchmarkStateMachine_State_Parallel-10         14117120                86.30 ns/op            0 B/op        0 allocs/op
+BenchmarkStateMachine_Fire_Parallel-10          21855120                55.27 ns/op            0 B/op        0 allocs/op
+```

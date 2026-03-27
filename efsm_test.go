@@ -130,6 +130,38 @@ func TestStateMachine_GuardAction(t *testing.T) {
 	}
 }
 
+func TestStateMachine_AvailableStates(t *testing.T) {
+	t.Parallel()
+
+	builder := efsm.NewBuilder[State, Event, any](StateIdle)
+	builder.Configure(StateIdle).
+		Permit(EventStart, StateRunning).
+		Permit(EventFail, StateError)
+
+	sm := builder.Build()
+
+	states := sm.AvailableStates()
+	if len(states) != 1 {
+		t.Fatalf("expected 1 available states, got %d", len(states))
+	}
+
+	if states[0] != StateIdle {
+		t.Fatalf("expected available state to be %v, got %v", StateIdle, states[0])
+	}
+}
+
+func TestStateMachine_AvailableEvents_Empty(t *testing.T) {
+	t.Parallel()
+
+	builder := efsm.NewBuilder[State, Event, any](StateIdle)
+	sm := builder.Build()
+
+	events := sm.AvailableEvents()
+	if len(events) != 0 {
+		t.Fatalf("expected 0 available events, got %d", len(events))
+	}
+}
+
 func TestStateMachine_AvailableEvents(t *testing.T) {
 	t.Parallel()
 
@@ -159,6 +191,64 @@ func TestStateMachine_AvailableEvents(t *testing.T) {
 
 	if !hasStart || !hasFail {
 		t.Fatalf("missing expected events in AvailableEvents result")
+	}
+}
+
+func TestStateMachine_AvaliableEvents_Empty(t *testing.T) {
+	t.Parallel()
+
+	builder := efsm.NewBuilder[State, Event, any](StateIdle)
+	sm := builder.Build()
+
+	eventsForStates := sm.AvaliableEventsForStates()
+	if len(eventsForStates) != 0 {
+		t.Fatalf("expected 0 states in events map, got %d", len(eventsForStates))
+	}
+}
+
+func TestStateMachine_AvailableEventsForStates(t *testing.T) {
+	t.Parallel()
+
+	builder := efsm.NewBuilder[State, Event, any](StateIdle)
+	builder.Configure(StateIdle).
+		Permit(EventStart, StateRunning).
+		Permit(EventFail, StateError)
+
+	builder.Configure(StateRunning).
+		Permit(EventReset, StateIdle)
+
+	sm := builder.Build()
+
+	eventsForStates := sm.AvaliableEventsForStates()
+
+	if len(eventsForStates) != 2 {
+		t.Fatalf("expected 2 states in events map, got %d", len(eventsForStates))
+	}
+
+	idleEvents, ok := eventsForStates[StateIdle]
+	if !ok || len(idleEvents) != 2 {
+		t.Fatalf("expected 2 events for state %v, got %d", StateIdle, len(idleEvents))
+	}
+
+	runningEvents, ok := eventsForStates[StateRunning]
+	if !ok || len(runningEvents) != 1 {
+		t.Fatalf("expected 1 event for state %v, got %d", StateRunning, len(runningEvents))
+	}
+
+	if runningEvents[0] != EventReset {
+		t.Fatalf("expected event for state %v to be %v, got %v", StateRunning, EventReset, runningEvents[0])
+	}
+}
+
+func TestStateMachine_AvailableEventsForStates_Empty(t *testing.T) {
+	t.Parallel()
+
+	builder := efsm.NewBuilder[State, Event, any](StateIdle)
+	sm := builder.Build()
+
+	eventsForStates := sm.AvaliableEventsForStates()
+	if len(eventsForStates) != 0 {
+		t.Fatalf("expected 0 states in events map, got %d", len(eventsForStates))
 	}
 }
 
