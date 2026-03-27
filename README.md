@@ -52,9 +52,9 @@ func main() {
 			StateConnecting,
 			EventSuccess,
 			StateConnected,
-			func(ctx context.Context, transition efsm.Transition[State, Event], data ConnectionData) error {
+			func(ctx context.Context, t efsm.Transition[State, Event], d ConnectionData) error {
 				fmt.Printf("Transitioning from %s to %s (Retries: %d)\n",
-					transition.From, transition.To, data.RetryCount)
+					t.From, t.To, d.RetryCount)
         return nil
 			}
 		).
