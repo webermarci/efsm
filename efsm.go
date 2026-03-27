@@ -64,14 +64,6 @@ type StateBuilder[S comparable, E comparable, D any] struct {
 
 // State begins the configuration of a specific state and returns a builder for method chaining.
 func (sm *StateMachine[S, E, D]) State(state S) *StateBuilder[S, E, D] {
-	sm.mutex.Lock()
-	defer sm.mutex.Unlock()
-
-	// Ensure the transitions map exists for this state so the builder doesn't panic later
-	if _, exists := sm.transitions[state]; !exists {
-		sm.transitions[state] = make(map[E]TransitionRule[S, E, D])
-	}
-
 	return &StateBuilder[S, E, D]{
 		sm:    sm,
 		state: state,
@@ -84,9 +76,9 @@ func (sb *StateBuilder[S, E, D]) OnEntry(effect Effect[S, E, D]) *StateBuilder[S
 	sb.sm.mutex.Lock()
 	defer sb.sm.mutex.Unlock()
 
-	rule := sb.sm.stateRules[sb.state]
-	rule.EntryEffect = effect
-	sb.sm.stateRules[sb.state] = rule
+	data := sb.sm.states[sb.state]
+	data.entryEffect = effect
+	sb.sm.states[sb.state] = data
 
 	return sb
 }
@@ -97,9 +89,9 @@ func (sb *StateBuilder[S, E, D]) OnExit(effect Effect[S, E, D]) *StateBuilder[S,
 	sb.sm.mutex.Lock()
 	defer sb.sm.mutex.Unlock()
 
-	rule := sb.sm.stateRules[sb.state]
-	rule.ExitEffect = effect
-	sb.sm.stateRules[sb.state] = rule
+	data := sb.sm.states[sb.state]
+	data.exitEffect = effect
+	sb.sm.states[sb.state] = data
 
 	return sb
 }
@@ -110,19 +102,24 @@ func (sb *StateBuilder[S, E, D]) Permit(event E, target S, opts ...TransitionOpt
 	defer sb.sm.mutex.Unlock()
 
 	rule := TransitionRule[S, E, D]{Target: target}
-
 	for _, opt := range opts {
 		opt(&rule)
 	}
 
-	sb.sm.transitions[sb.state][event] = rule
+	data := sb.sm.states[sb.state]
+	if data.transitions == nil {
+		data.transitions = make(map[E]TransitionRule[S, E, D])
+	}
+	data.transitions[event] = rule
+	sb.sm.states[sb.state] = data
 
 	return sb
 }
 
-type StateRule[S comparable, E comparable, D any] struct {
-	EntryEffect Effect[S, E, D]
-	ExitEffect  Effect[S, E, D]
+type stateData[S comparable, E comparable, D any] struct {
+	transitions map[E]TransitionRule[S, E, D]
+	entryEffect Effect[S, E, D]
+	exitEffect  Effect[S, E, D]
 }
 
 // StateMachine is a running finite state machine instance. It is safe for
@@ -130,8 +127,7 @@ type StateRule[S comparable, E comparable, D any] struct {
 // a write lock to serialize transitions.
 type StateMachine[S comparable, E comparable, D any] struct {
 	currentState S
-	transitions  map[S]map[E]TransitionRule[S, E, D]
-	stateRules   map[S]StateRule[S, E, D]
+	states       map[S]stateData[S, E, D]
 	mutex        sync.RWMutex
 }
 
@@ -139,8 +135,7 @@ type StateMachine[S comparable, E comparable, D any] struct {
 func NewStateMachine[S comparable, E comparable, D any](initial S) *StateMachine[S, E, D] {
 	return &StateMachine[S, E, D]{
 		currentState: initial,
-		transitions:  make(map[S]map[E]TransitionRule[S, E, D]),
-		stateRules:   make(map[S]StateRule[S, E, D]),
+		states:       make(map[S]stateData[S, E, D]),
 	}
 }
 
@@ -156,8 +151,8 @@ func (sm *StateMachine[S, E, D]) AvailableStates() []S {
 	sm.mutex.RLock()
 	defer sm.mutex.RUnlock()
 
-	var states []S
-	for state := range sm.transitions {
+	states := make([]S, 0, len(sm.states))
+	for state := range sm.states {
 		states = append(states, state)
 	}
 	return states
@@ -168,11 +163,10 @@ func (sm *StateMachine[S, E, D]) AvailableEvents() []E {
 	sm.mutex.RLock()
 	defer sm.mutex.RUnlock()
 
-	var events []E
-	if stateRules, exists := sm.transitions[sm.currentState]; exists {
-		for event := range stateRules {
-			events = append(events, event)
-		}
+	data := sm.states[sm.currentState]
+	events := make([]E, 0, len(data.transitions))
+	for event := range data.transitions {
+		events = append(events, event)
 	}
 	return events
 }
@@ -182,10 +176,10 @@ func (sm *StateMachine[S, E, D]) AvailableEventsForStates() map[S][]E {
 	sm.mutex.RLock()
 	defer sm.mutex.RUnlock()
 
-	eventsForStates := make(map[S][]E)
-	for state, stateRules := range sm.transitions {
-		var events []E
-		for event := range stateRules {
+	eventsForStates := make(map[S][]E, len(sm.states))
+	for state, data := range sm.states {
+		events := make([]E, 0, len(data.transitions))
+		for event := range data.transitions {
 			events = append(events, event)
 		}
 		eventsForStates[state] = events
@@ -206,13 +200,13 @@ func (sm *StateMachine[S, E, D]) Fire(event E, data D) error {
 
 	oldState := sm.currentState
 
-	stateRules, exists := sm.transitions[oldState]
-	if !exists {
+	currentData, exists := sm.states[oldState]
+	if !exists || currentData.transitions == nil {
 		sm.mutex.Unlock()
 		return fmt.Errorf("%w: %v", ErrNoTransitions, oldState)
 	}
 
-	rule, validEvent := stateRules[event]
+	rule, validEvent := currentData.transitions[event]
 	if !validEvent {
 		sm.mutex.Unlock()
 		return fmt.Errorf("%w: %v in %v", ErrInvalidEvent, event, oldState)
@@ -229,9 +223,11 @@ func (sm *StateMachine[S, E, D]) Fire(event E, data D) error {
 
 	sm.currentState = rule.Target
 
+	targetData := sm.states[rule.Target]
+
+	exitEffect := currentData.exitEffect
 	transitionEffect := rule.Effect
-	exitEffect := sm.stateRules[oldState].ExitEffect
-	entryEffect := sm.stateRules[rule.Target].EntryEffect
+	entryEffect := targetData.entryEffect
 
 	sm.mutex.Unlock()
 
