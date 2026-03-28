@@ -239,6 +239,110 @@ func TestStateMachine_EffectExecutionOrder(t *testing.T) {
 	}
 }
 
+func TestStateMachine_SelfTransition(t *testing.T) {
+	t.Parallel()
+
+	sm := efsm.NewStateMachine[State, Event, *DataContext](StateRunning)
+
+	var executionOrder []string
+	var mu sync.Mutex
+
+	record := func(step string) {
+		mu.Lock()
+		defer mu.Unlock()
+		executionOrder = append(executionOrder, step)
+	}
+
+	sm.State(StateRunning).
+		OnExit(func(efsm.Transition[State, Event], *DataContext) { record("exit") }).
+		OnEntry(func(efsm.Transition[State, Event], *DataContext) { record("entry") }).
+		Permit(EventReset, StateRunning, efsm.OnTransition(func(efsm.Transition[State, Event], *DataContext) {
+			record("transition")
+		}))
+
+	err := sm.Fire(EventReset, nil)
+	if err != nil {
+		t.Fatalf("unexpected error on self-transition: %v", err)
+	}
+
+	if sm.CurrentState() != StateRunning {
+		t.Fatalf("expected state to remain %v, got %v", StateRunning, sm.CurrentState())
+	}
+
+	if len(executionOrder) != 3 {
+		t.Fatalf("expected 3 effects, got %d", len(executionOrder))
+	}
+
+	if executionOrder[0] != "exit" || executionOrder[1] != "transition" || executionOrder[2] != "entry" {
+		t.Errorf("unexpected execution order for self-transition: %v", executionOrder)
+	}
+}
+
+func TestStateMachine_OverwriteOptions(t *testing.T) {
+	t.Parallel()
+
+	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
+
+	guard1Called, guard2Called := false, false
+	effect1Called, effect2Called := false, false
+
+	sm.State(StateIdle).Permit(EventStart, StateRunning,
+		efsm.WithGuard(func(efsm.Transition[State, Event], *DataContext) error {
+			guard1Called = true
+			return nil
+		}),
+		efsm.WithGuard(func(efsm.Transition[State, Event], *DataContext) error {
+			guard2Called = true
+			return nil
+		}),
+		efsm.OnTransition(func(efsm.Transition[State, Event], *DataContext) {
+			effect1Called = true
+		}),
+		efsm.OnTransition(func(efsm.Transition[State, Event], *DataContext) {
+			effect2Called = true
+		}),
+	)
+
+	_ = sm.Fire(EventStart, nil)
+
+	if guard1Called {
+		t.Error("expected guard1 to be overwritten, but it was called")
+	}
+
+	if !guard2Called {
+		t.Error("expected guard2 to be called")
+	}
+
+	if effect1Called {
+		t.Error("expected effect1 to be overwritten, but it was called")
+	}
+
+	if !effect2Called {
+		t.Error("expected effect2 to be called")
+	}
+}
+
+func TestStateMachine_DataPropagation(t *testing.T) {
+	t.Parallel()
+
+	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
+	testData := &DataContext{Retries: 42}
+
+	var dataObserved *DataContext
+
+	sm.State(StateIdle).Permit(EventStart, StateRunning,
+		efsm.OnTransition(func(_ efsm.Transition[State, Event], d *DataContext) {
+			dataObserved = d
+		}),
+	)
+
+	_ = sm.Fire(EventStart, testData)
+
+	if dataObserved == nil || dataObserved.Retries != 42 {
+		t.Errorf("expected data context with Retries 42, got %v", dataObserved)
+	}
+}
+
 func TestStateMachine_AvailableStates(t *testing.T) {
 	t.Parallel()
 
@@ -380,6 +484,28 @@ func BenchmarkStateMachine_Fire(b *testing.B) {
 	sm.State(0).Permit(1, 1)
 	sm.State(1).Permit(0, 0)
 
+	b.ResetTimer()
+
+	for i := 0; b.Loop(); i++ {
+		event := i % 2
+		_ = sm.Fire(event, nil)
+	}
+}
+
+func BenchmarkStateMachine_FireWithEffects(b *testing.B) {
+	sm := efsm.NewStateMachine[int, int, any](0)
+
+	sm.State(0).
+		OnExit(func(efsm.Transition[int, int], any) {}).
+		Permit(1, 1, efsm.WithGuard(func(efsm.Transition[int, int], any) error { return nil }),
+			efsm.OnTransition(func(efsm.Transition[int, int], any) {}))
+
+	sm.State(1).
+		OnEntry(func(efsm.Transition[int, int], any) {}).
+		Permit(0, 0)
+
+	b.ResetTimer()
+
 	for i := 0; b.Loop(); i++ {
 		event := i % 2
 		_ = sm.Fire(event, nil)
@@ -390,6 +516,7 @@ func BenchmarkStateMachine_State_Parallel(b *testing.B) {
 	sm := efsm.NewStateMachine[int, int, any](0)
 
 	b.ResetTimer()
+
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			_ = sm.CurrentState()
@@ -404,6 +531,7 @@ func BenchmarkStateMachine_Fire_Parallel(b *testing.B) {
 	sm.State(1).Permit(0, 0)
 
 	b.ResetTimer()
+
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
 			st := sm.CurrentState()

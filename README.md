@@ -114,7 +114,8 @@ goos: darwin
 goarch: arm64
 pkg: github.com/webermarci/efsm
 cpu: Apple M5
-BenchmarkStateMachine_Fire-10             152293412    7.63 ns/op   0 B/op   0 allocs/op
-BenchmarkStateMachine_State_Parallel-10   1000000000   0.20 ns/op   0 B/op   0 allocs/op
-BenchmarkStateMachine_Fire_Parallel-10    19826025    59.61 ns/op   0 B/op   0 allocs/op
+BenchmarkStateMachine_Fire-10              152293412    7.63 ns/op   0 B/op   0 allocs/op
+BenchmarkStateMachine_FireWithEffects-10   144341641    8.32 ns/op   0 B/op   0 allocs/op
+BenchmarkStateMachine_State_Parallel-10    1000000000   0.20 ns/op   0 B/op   0 allocs/op
+BenchmarkStateMachine_Fire_Parallel-10     19826025    59.61 ns/op   0 B/op   0 allocs/op
 ```
