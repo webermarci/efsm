@@ -8,14 +8,14 @@
 
 It is relentlessly optimized for high-throughput, highly concurrent environments. It features a zero-allocation pointer-graph architecture, 100% lock-free reads, and CPU cache-line padding to prevent false sharing.
 
-### Features
+## Features
 
 - Type-safe states and events using Go generics.
 - Thread-safe state transitions with 100% lock-free reads and mutually exclusive writes.
 - Fluent builder pattern for clean and intuitive configuration.
 - Transition guards that support custom data payloads.
 
-### Quick start
+## Quick start
 
 ```go
 package main
@@ -107,7 +107,7 @@ func main() {
 }
 ```
 
-### Benchmark
+## Benchmark
 
 ```bash
 goos: darwin
