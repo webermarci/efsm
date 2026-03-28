@@ -1,6 +1,4 @@
 name: Test
-permissions:
-  contents: read
 on:
   push:
     branches: ["main"]
@@ -8,6 +6,8 @@ on:
 
 jobs:
   test:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     steps:
       - name: Setup Go
