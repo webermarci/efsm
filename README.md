@@ -4,7 +4,7 @@
 [![Test](https://github.com/webermarci/efsm/actions/workflows/test.yml/badge.svg)](https://github.com/webermarci/efsm/actions/workflows/test.yml)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-`efsm` is a generic, thread-safe, extended finite state machine (FSM) for Go. It provides a fluent builder API to define states, events, and transition guards, making it easy to model complex logic safely in concurrent environments.
+`efsm` is a generic, thread-safe, extended finite state machine (EFSM) for Go. It provides a fluent builder API to define states, events, and transition guards, making it easy to model complex logic safely in concurrent environments.
 
 It is relentlessly optimized for high-throughput, highly concurrent environments. It features a zero-allocation pointer-graph architecture, 100% lock-free reads, and CPU cache-line padding to prevent false sharing.
 
