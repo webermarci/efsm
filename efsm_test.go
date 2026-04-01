@@ -500,12 +500,8 @@ func TestStateMachine_AvailableStates(t *testing.T) {
 		Permit(EventFail, StateError)
 
 	states := sm.AvailableStates()
-	if len(states) != 1 {
-		t.Fatalf("expected 1 available states, got %d", len(states))
-	}
-
-	if states[0] != StateIdle {
-		t.Fatalf("expected available state to be %v, got %v", StateIdle, states[0])
+	if len(states) != 3 {
+		t.Fatalf("expected 3 available states, got %d", len(states))
 	}
 }
 

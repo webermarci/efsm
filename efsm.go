@@ -52,7 +52,11 @@ type TransitionRule[S comparable, E comparable, D any] struct {
 type TransitionOption[S comparable, E comparable, D any] func(*TransitionRule[S, E, D])
 
 // WithGuard is a TransitionOption that sets a guard function for a transition rule.
-// Note: If multiple WithGuard options are provided for the same transition, the last one overwrites previous ones.
+// If multiple WithGuard options are provided for the same transition, the last one overwrites previous ones.
+//
+// IMPORTANT: Guards are called while the state machine lock is held. You MUST NOT
+// call Fire() synchronously from within a guard — doing so will deadlock.
+// Guards should only validate conditions and return an error to block the transition.
 func WithGuard[S comparable, E comparable, D any](guard Guard[S, E, D]) TransitionOption[S, E, D] {
 	return func(rule *TransitionRule[S, E, D]) {
 		rule.guard = guard
@@ -61,7 +65,11 @@ func WithGuard[S comparable, E comparable, D any](guard Guard[S, E, D]) Transiti
 
 // WithRedirect is a TransitionOption that sets a redirect function for a transition rule.
 // Redirecting to the source state is not allowed and will result in an `ErrSelfRedirect`.
-// Note: If multiple WithRedirect options are provided for the same transition, the last one overwrites previous ones.
+// If multiple WithRedirect options are provided for the same transition, the last one overwrites previous ones.
+//
+// IMPORTANT: Redirects are called while the state machine lock is held. You MUST NOT
+// call Fire() synchronously from within a redirect — doing so will deadlock.
+// Redirects should only validate conditions and return a state.
 func WithRedirect[S comparable, E comparable, D any](redirect Redirect[S, E, D]) TransitionOption[S, E, D] {
 	return func(rule *TransitionRule[S, E, D]) {
 		rule.redirect = redirect
@@ -69,7 +77,11 @@ func WithRedirect[S comparable, E comparable, D any](redirect Redirect[S, E, D])
 }
 
 // OnTransition is a TransitionOption that sets an effect function for a transition rule.
-// Note: If multiple OnTransition options are provided for the same transition, the last one overwrites previous ones.
+// If multiple OnTransition options are provided for the same transition, the last one overwrites previous ones.
+//
+// IMPORTANT: Effects are called while the state machine lock is held. You MUST NOT
+// call Fire() synchronously from within an effect — doing so will deadlock.
+// To trigger a subsequent transition from an effect, spawn a new goroutine.
 func OnTransition[S comparable, E comparable, D any](effect Effect[S, E, D]) TransitionOption[S, E, D] {
 	return func(rule *TransitionRule[S, E, D]) {
 		rule.effect = effect
@@ -91,7 +103,11 @@ func (sm *StateMachine[S, E, D]) State(state S) StateBuilder[S, E, D] {
 }
 
 // OnEntry adds an effect that runs whenever this state is entered.
-// Note: If called multiple times on the same builder, the last one overwrites previous ones.
+// If called multiple times on the same builder, the last one overwrites previous ones.
+//
+// IMPORTANT: Effects are called while the state machine lock is held. You MUST NOT
+// call Fire() synchronously from within an effect — doing so will deadlock.
+// To trigger a subsequent transition from an effect, spawn a new goroutine.
 func (sb StateBuilder[S, E, D]) OnEntry(effect Effect[S, E, D]) StateBuilder[S, E, D] {
 	sb.sm.mutex.Lock()
 	defer sb.sm.mutex.Unlock()
@@ -102,7 +118,11 @@ func (sb StateBuilder[S, E, D]) OnEntry(effect Effect[S, E, D]) StateBuilder[S, 
 }
 
 // OnExit adds an effect that runs whenever this state is exited.
-// Note: If called multiple times on the same builder, the last one overwrites previous ones.
+// If called multiple times on the same builder, the last one overwrites previous ones.
+//
+// IMPORTANT: Effects are called while the state machine lock is held. You MUST NOT
+// call Fire() synchronously from within an effect — doing so will deadlock.
+// To trigger a subsequent transition from an effect, spawn a new goroutine.
 func (sb StateBuilder[S, E, D]) OnExit(effect Effect[S, E, D]) StateBuilder[S, E, D] {
 	sb.sm.mutex.Lock()
 	defer sb.sm.mutex.Unlock()
@@ -180,20 +200,23 @@ func (sm *StateMachine[S, E, D]) getOrCreateNode(state S) *stateData[S, E, D] {
 }
 
 // CurrentState returns the current state of the machine.
+//
+// This is a lock-free read. The returned state may reflect a completed
+// transition whose effects (OnEntry, OnExit, OnTransition) are still executing
+// on another goroutine.
 func (sm *StateMachine[S, E, D]) CurrentState() S {
 	return sm.currentState.Load().(S)
 }
 
-// AvailableStates returns a slice of states that have defined transitions.
+// AvailableStates returns a slice of all registered states,
+// including terminal states with no outgoing transitions.
 func (sm *StateMachine[S, E, D]) AvailableStates() []S {
 	sm.mutex.Lock()
 	defer sm.mutex.Unlock()
 
 	var states []S
-	for state, node := range sm.states {
-		if len(node.transitions) > 0 {
-			states = append(states, state)
-		}
+	for state := range sm.states {
+		states = append(states, state)
 	}
 	return states
 }
@@ -242,17 +265,16 @@ func (sm *StateMachine[S, E, D]) AvailableEventsForStates() map[S][]E {
 //   - Guard error if the guard fails.
 func (sm *StateMachine[S, E, D]) Fire(event E, data D) error {
 	sm.mutex.Lock()
+	defer sm.mutex.Unlock()
 
 	currentNode := sm.active
 
 	if currentNode.transitions == nil {
-		sm.mutex.Unlock()
 		return ErrNoTransitions
 	}
 
 	rule, validEvent := currentNode.transitions[event]
 	if !validEvent {
-		sm.mutex.Unlock()
 		return ErrInvalidEvent
 	}
 
@@ -260,7 +282,6 @@ func (sm *StateMachine[S, E, D]) Fire(event E, data D) error {
 
 	if rule.guard != nil {
 		if err := rule.guard(transition, data); err != nil {
-			sm.mutex.Unlock()
 			return err
 		}
 	}
@@ -269,7 +290,6 @@ func (sm *StateMachine[S, E, D]) Fire(event E, data D) error {
 		redirectTarget := rule.redirect(transition, data)
 
 		if redirectTarget == transition.From {
-			sm.mutex.Unlock()
 			return ErrSelfRedirect
 		}
 
@@ -288,8 +308,6 @@ func (sm *StateMachine[S, E, D]) Fire(event E, data D) error {
 	exitEffect := currentNode.exitEffect
 	transitionEffect := rule.effect
 	entryEffect := rule.targetNode.entryEffect
-
-	sm.mutex.Unlock()
 
 	if exitEffect != nil {
 		exitEffect(transition, data)
