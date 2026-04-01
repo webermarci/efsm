@@ -14,6 +14,7 @@ It is relentlessly optimized for high-throughput, highly concurrent environments
 - Thread-safe state transitions with 100% lock-free reads and mutually exclusive writes.
 - Fluent builder pattern for clean and intuitive configuration.
 - Transition guards that support custom data payloads.
+- Dynamic conditional routing at runtime (`WithRedirect`).
 
 ## Quick start
 
@@ -35,10 +36,12 @@ const (
 	StateDisconnected State = "Disconnected"
 	StateConnecting   State = "Connecting"
 	StateConnected    State = "Connected"
+	StateFailed       State = "Failed"
 
 	EventConnect    Event = "Connect"
 	EventDisconnect Event = "Disconnect"
 	EventSuccess    Event = "Success"
+	EventError      Event = "Error"
 )
 
 // 2. Define the generic data payload passed to hooks
@@ -62,13 +65,22 @@ func main() {
 		OnEntry(func(t efsm.Transition[State, Event], d Data) {
 			fmt.Printf("⏳ Hook: Attempting connection to %s...\n", d.IPAddress)
 		}).
-		// Use a Guard to reject the transition if max retries are exceeded
+		// Use a Guard to reject the transition if parameters are invalid
 		Permit(EventSuccess, StateConnected, efsm.WithGuard(
 			func(t efsm.Transition[State, Event], d Data) error {
-				if d.RetryCount > 3 {
-					return errors.New("max connection retries exceeded")
+				if d.IPAddress == "" {
+					return errors.New("missing IP address")
 				}
 				return nil
+			},
+		)).
+		// Use a dynamic redirect to evaluate runtime data and choose the target state
+		Permit(EventError, StateDisconnected, efsm.WithRedirect(
+			func(t efsm.Transition[State, Event], d Data) State {
+				if d.RetryCount >= 3 {
+					return StateFailed // Out of retries, route to Failed state
+				}
+				return t.To // Fallback to default target (Disconnected)
 			},
 		)).
 		// Add an effect specific to this transition
@@ -84,8 +96,14 @@ func main() {
 		}).
 		Permit(EventDisconnect, StateDisconnected)
 
+	sm.State(StateFailed).
+		OnEntry(func(t efsm.Transition[State, Event], d Data) {
+			fmt.Println("🚨 Hook: Connection failed permanently.")
+		}).
+		Permit(EventConnect, StateConnecting) // Allow manual retry
+
 	// 4. Execute the state machine
-	payload := Data{RetryCount: 1, IPAddress: "192.168.1.100"}
+	payload := Data{RetryCount: 3, IPAddress: "192.168.1.100"}
 
 	fmt.Printf("Initial State: %s\n", sm.CurrentState())
 
@@ -93,17 +111,9 @@ func main() {
 	_ = sm.Fire(EventConnect, payload)
 	fmt.Printf("Current State: %s\n\n", sm.CurrentState())
 
-	// Fire: Connecting -> Connected (Guard passes)
-	_ = sm.Fire(EventSuccess, payload)
+	// Fire: Connecting -> Failed (Redirect dynamically overrides Disconnected)
+	_ = sm.Fire(EventError, payload)
 	fmt.Printf("Current State: %s\n\n", sm.CurrentState())
-
-	// Test Guard failure scenario
-	badPayload := Data{RetryCount: 5, IPAddress: "192.168.1.100"}
-	err := sm.Fire(EventConnect, badPayload) // Invalid in Connected state
-	if err != nil {
-		// Output: event is not valid in current state: Connect in Connected
-		fmt.Printf("Error: %v\n", err)
-	}
 }
 ```
 
@@ -114,8 +124,10 @@ goos: darwin
 goarch: arm64
 pkg: github.com/webermarci/efsm
 cpu: Apple M5
-BenchmarkStateMachine_Fire-10              152293412    7.63 ns/op   0 B/op   0 allocs/op
-BenchmarkStateMachine_FireWithEffects-10   144341641    8.32 ns/op   0 B/op   0 allocs/op
-BenchmarkStateMachine_State_Parallel-10    1000000000   0.20 ns/op   0 B/op   0 allocs/op
-BenchmarkStateMachine_Fire_Parallel-10     19826025    59.61 ns/op   0 B/op   0 allocs/op
+BenchmarkStateMachine_Fire-10                      152293412   7.63 ns/op  0 B/op  0 allocs/op
+BenchmarkStateMachine_FireWithEffects-10           144341641   8.32 ns/op  0 B/op  0 allocs/op
+BenchmarkStateMachine_State_Parallel-10           1000000000   0.20 ns/op  0 B/op  0 allocs/op
+BenchmarkStateMachine_Fire_Parallel-10              19826025  59.61 ns/op  0 B/op  0 allocs/op
+BenchmarkStateMachine_FireWithRedirect-10          122129552  9.819 ns/op  0 B/op  0 allocs/op
+BenchmarkStateMachine_FireWithRedirect_Parallel-10  17619495  68.29 ns/op  0 B/op  0 allocs/op
 ```

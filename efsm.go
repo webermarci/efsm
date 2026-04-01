@@ -14,6 +14,10 @@ var (
 	// ErrInvalidEvent is returned by Fire when the supplied event is not valid in
 	// the current state.
 	ErrInvalidEvent = errors.New("event is not valid in current state")
+
+	// ErrSelfRedirect is returned by builder methods when a transition is configured
+	// to redirect to the source state.
+	ErrSelfRedirect = errors.New("transition cannot redirect to the source state")
 )
 
 // Transition represents a state change triggered by an event.
@@ -30,6 +34,10 @@ type Guard[S comparable, E comparable, D any] func(transition Transition[S, E], 
 // It can be used for side effects like logging or triggering external actions.
 type Effect[S comparable, E comparable, D any] func(transition Transition[S, E], data D)
 
+// Redirect defines a callback function that can dynamically determine the target state during a transition.
+// It is executed during the transition process and can be used to implement dynamic state transitions based on runtime conditions.
+type Redirect[S comparable, E comparable, D any] func(transition Transition[S, E], data D) S
+
 // TransitionRule defines the outcome of an event, including the target state and an optional guard.
 type TransitionRule[S comparable, E comparable, D any] struct {
 	target      S
@@ -37,6 +45,7 @@ type TransitionRule[S comparable, E comparable, D any] struct {
 	targetNode  *stateData[S, E, D]
 	guard       Guard[S, E, D]
 	effect      Effect[S, E, D]
+	redirect    Redirect[S, E, D]
 }
 
 // TransitionOption is a functional option type for configuring transition rules.
@@ -47,6 +56,15 @@ type TransitionOption[S comparable, E comparable, D any] func(*TransitionRule[S,
 func WithGuard[S comparable, E comparable, D any](guard Guard[S, E, D]) TransitionOption[S, E, D] {
 	return func(rule *TransitionRule[S, E, D]) {
 		rule.guard = guard
+	}
+}
+
+// WithRedirect is a TransitionOption that sets a redirect function for a transition rule.
+// Redirecting to the source state is not allowed and will result in an `ErrSelfRedirect`.
+// Note: If multiple WithRedirect options are provided for the same transition, the last one overwrites previous ones.
+func WithRedirect[S comparable, E comparable, D any](redirect Redirect[S, E, D]) TransitionOption[S, E, D] {
+	return func(rule *TransitionRule[S, E, D]) {
+		rule.redirect = redirect
 	}
 }
 
@@ -245,6 +263,21 @@ func (sm *StateMachine[S, E, D]) Fire(event E, data D) error {
 			sm.mutex.Unlock()
 			return err
 		}
+	}
+
+	if rule.redirect != nil {
+		redirectTarget := rule.redirect(transition, data)
+
+		if redirectTarget == transition.From {
+			sm.mutex.Unlock()
+			return ErrSelfRedirect
+		}
+
+		rule.target = redirectTarget
+		rule.boxedTarget = any(redirectTarget)
+		rule.targetNode = sm.getOrCreateNode(redirectTarget)
+
+		transition.To = redirectTarget
 	}
 
 	sm.innerState = rule.target

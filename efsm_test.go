@@ -167,6 +167,153 @@ func TestStateMachine_Guard(t *testing.T) {
 	}
 }
 
+func TestStateMachine_Redirect(t *testing.T) {
+	t.Parallel()
+
+	sm1 := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
+
+	sm1.State(StateIdle).Permit(EventStart, StateRunning,
+		efsm.WithRedirect(func(t efsm.Transition[State, Event], d *DataContext) State {
+			if d.Retries > 3 {
+				return StateError
+			}
+			return t.To
+		}),
+	)
+
+	err := sm1.Fire(EventStart, &DataContext{Retries: 2})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if state := sm1.CurrentState(); state != StateRunning {
+		t.Fatalf("expected state %v, got %v", StateRunning, state)
+	}
+
+	sm2 := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
+
+	sm2.State(StateIdle).Permit(EventStart, StateRunning,
+		efsm.WithRedirect(func(t efsm.Transition[State, Event], d *DataContext) State {
+			if d.Retries > 3 {
+				return StateError
+			}
+			return t.To
+		}),
+	)
+
+	err2 := sm2.Fire(EventStart, &DataContext{Retries: 5})
+	if err2 != nil {
+		t.Fatalf("unexpected error: %v", err2)
+	}
+
+	if state := sm2.CurrentState(); state != StateError {
+		t.Fatalf("expected state %v, got %v", StateError, state)
+	}
+}
+
+func TestStateMachine_RedirectLoopPrevention(t *testing.T) {
+	t.Parallel()
+
+	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
+
+	sm.State(StateIdle).Permit(EventStart, StateRunning,
+		efsm.WithRedirect(func(t efsm.Transition[State, Event], d *DataContext) State {
+			return StateIdle
+		}),
+	)
+
+	err := sm.Fire(EventStart, nil)
+	if err == nil {
+		t.Fatal("expected error on self-redirect, got nil")
+	}
+
+	if !errors.Is(err, efsm.ErrSelfRedirect) {
+		t.Fatalf("expected ErrSelfRedirect, got %v", err)
+	}
+
+	if state := sm.CurrentState(); state != StateIdle {
+		t.Fatalf("expected state to remain %v, got %v", StateIdle, state)
+	}
+}
+
+func TestStateMachine_RedirectEffectsContext(t *testing.T) {
+	t.Parallel()
+
+	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
+
+	var targetInEffect State
+	var entryCalledForError bool
+	var entryCalledForRunning bool
+
+	sm.State(StateIdle).Permit(EventStart, StateRunning,
+		efsm.WithRedirect(func(t efsm.Transition[State, Event], d *DataContext) State {
+			return StateError
+		}),
+		efsm.OnTransition(func(t efsm.Transition[State, Event], d *DataContext) {
+			targetInEffect = t.To
+		}),
+	)
+
+	sm.State(StateRunning).OnEntry(func(t efsm.Transition[State, Event], d *DataContext) {
+		entryCalledForRunning = true
+	})
+
+	sm.State(StateError).OnEntry(func(t efsm.Transition[State, Event], d *DataContext) {
+		entryCalledForError = true
+	})
+
+	err := sm.Fire(EventStart, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if targetInEffect != StateError {
+		t.Errorf("expected transition effect to receive To=%v, got To=%v", StateError, targetInEffect)
+	}
+
+	if entryCalledForRunning {
+		t.Error("expected StateRunning entry effect NOT to be called")
+	}
+
+	if !entryCalledForError {
+		t.Error("expected StateError entry effect to be called")
+	}
+}
+
+func TestStateMachine_RedirectOverwriteOptions(t *testing.T) {
+	t.Parallel()
+
+	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
+
+	redirect1Called := false
+	redirect2Called := false
+
+	sm.State(StateIdle).Permit(EventStart, StateRunning,
+		efsm.WithRedirect(func(t efsm.Transition[State, Event], d *DataContext) State {
+			redirect1Called = true
+			return t.To
+		}),
+		efsm.WithRedirect(func(t efsm.Transition[State, Event], d *DataContext) State {
+			redirect2Called = true
+			return StateError
+		}),
+	)
+
+	_ = sm.Fire(EventStart, nil)
+
+	if redirect1Called {
+		t.Error("expected redirect1 to be overwritten, but it was called")
+	}
+
+	if !redirect2Called {
+		t.Error("expected redirect2 to be called")
+	}
+
+	if sm.CurrentState() != StateError {
+		t.Errorf("expected final state to be %v (from redirect2), got %v", StateError, sm.CurrentState())
+	}
+}
+
 func TestStateMachine_Effect(t *testing.T) {
 	t.Parallel()
 
@@ -529,6 +676,51 @@ func BenchmarkStateMachine_Fire_Parallel(b *testing.B) {
 
 	sm.State(0).Permit(1, 1)
 	sm.State(1).Permit(0, 0)
+
+	b.ResetTimer()
+
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			st := sm.CurrentState()
+			target := 1
+			if st == 1 {
+				target = 0
+			}
+			_ = sm.Fire(target, nil)
+		}
+	})
+}
+
+func BenchmarkStateMachine_FireWithRedirect(b *testing.B) {
+	sm := efsm.NewStateMachine[int, int, any](0)
+
+	sm.State(0).Permit(1, 0, efsm.WithRedirect(func(efsm.Transition[int, int], any) int {
+		return 1
+	}))
+	sm.State(1).Permit(0, 1, efsm.WithRedirect(func(efsm.Transition[int, int], any) int {
+		return 0
+	}))
+
+	b.ResetTimer()
+
+	for i := 0; b.Loop(); i++ {
+		event := 1
+		if i%2 != 0 {
+			event = 0
+		}
+		_ = sm.Fire(event, nil)
+	}
+}
+
+func BenchmarkStateMachine_FireWithRedirect_Parallel(b *testing.B) {
+	sm := efsm.NewStateMachine[int, int, any](0)
+
+	sm.State(0).Permit(1, 0, efsm.WithRedirect(func(efsm.Transition[int, int], any) int {
+		return 1
+	}))
+	sm.State(1).Permit(0, 1, efsm.WithRedirect(func(efsm.Transition[int, int], any) int {
+		return 0
+	}))
 
 	b.ResetTimer()
 
