@@ -38,12 +38,11 @@ type Redirect[S comparable, E comparable, D any] func(t Transition[S, E], data D
 
 // TransitionRule defines the outcome of an event, including the target state and an optional guard.
 type TransitionRule[S comparable, E comparable, D any] struct {
-	target      S
-	boxedTarget any
-	targetNode  *stateData[S, E, D]
-	guard       Guard[S, E, D]
-	effect      Effect[S, E, D]
-	redirect    Redirect[S, E, D]
+	target     S
+	targetNode *stateData[S, E, D]
+	guard      Guard[S, E, D]
+	effect     Effect[S, E, D]
+	redirect   Redirect[S, E, D]
 }
 
 // TransitionOption is a functional option type for configuring transition rules.
@@ -103,9 +102,8 @@ func (c *StateConfigurator[S, E, D]) Permit(event E, target S, opts ...Transitio
 	targetNode := c.sm.getOrCreateNode(target)
 
 	rule := TransitionRule[S, E, D]{
-		target:      target,
-		boxedTarget: any(target),
-		targetNode:  targetNode,
+		target:     target,
+		targetNode: targetNode,
 	}
 
 	for _, opt := range opts {
@@ -128,6 +126,7 @@ func (c *StateConfigurator[S, E, D]) PermitRedirect(event E, redirect Redirect[S
 }
 
 type stateData[S comparable, E comparable, D any] struct {
+	boxedState  any
 	transitions map[E]TransitionRule[S, E, D]
 	entryEffect []Effect[S, E, D]
 	exitEffect  []Effect[S, E, D]
@@ -139,7 +138,7 @@ type StateMachine[S comparable, E comparable, D any] struct {
 	currentState atomic.Value
 	_            [64]byte
 
-	mutex      sync.Mutex
+	mutex      sync.RWMutex
 	innerState S
 	active     *stateData[S, E, D]
 
@@ -185,7 +184,9 @@ func (sm *StateMachine[S, E, D]) Configure(state S, setups ...func(c *StateConfi
 func (sm *StateMachine[S, E, D]) getOrCreateNode(state S) *stateData[S, E, D] {
 	node, exists := sm.states[state]
 	if !exists {
-		node = &stateData[S, E, D]{}
+		node = &stateData[S, E, D]{
+			boxedState: any(state),
+		}
 		sm.states[state] = node
 	}
 	return node
@@ -198,8 +199,8 @@ func (sm *StateMachine[S, E, D]) CurrentState() S {
 
 // AvailableStates returns a slice of all registered states.
 func (sm *StateMachine[S, E, D]) AvailableStates() []S {
-	sm.mutex.Lock()
-	defer sm.mutex.Unlock()
+	sm.mutex.RLock()
+	defer sm.mutex.RUnlock()
 
 	var states []S
 	for state := range sm.states {
@@ -210,8 +211,8 @@ func (sm *StateMachine[S, E, D]) AvailableStates() []S {
 
 // AvailableEvents returns a slice of events that are valid in the current state.
 func (sm *StateMachine[S, E, D]) AvailableEvents() []E {
-	sm.mutex.Lock()
-	defer sm.mutex.Unlock()
+	sm.mutex.RLock()
+	defer sm.mutex.RUnlock()
 
 	data := sm.active
 
@@ -224,8 +225,8 @@ func (sm *StateMachine[S, E, D]) AvailableEvents() []E {
 
 // AvailableEventsForStates returns a map of states with their valid events.
 func (sm *StateMachine[S, E, D]) AvailableEventsForStates() map[S][]E {
-	sm.mutex.Lock()
-	defer sm.mutex.Unlock()
+	sm.mutex.RLock()
+	defer sm.mutex.RUnlock()
 
 	eventsForStates := make(map[S][]E)
 	for state, node := range sm.states {
@@ -246,8 +247,8 @@ func (sm *StateMachine[S, E, D]) AvailableEventsForStates() map[S][]E {
 // Note: This only checks if the transition exists. If the transition has a Guard
 // that would fail, Fire() will still return an error.
 func (sm *StateMachine[S, E, D]) CanFire(event E) bool {
-	sm.mutex.Lock()
-	defer sm.mutex.Unlock()
+	sm.mutex.RLock()
+	defer sm.mutex.RUnlock()
 
 	if sm.active == nil || sm.active.transitions == nil {
 		return false
@@ -297,14 +298,13 @@ func (sm *StateMachine[S, E, D]) Fire(event E, data D) error {
 		}
 
 		rule.target = redirectTarget
-		rule.boxedTarget = any(redirectTarget)
 		rule.targetNode = sm.getOrCreateNode(redirectTarget)
 
 		transition.To = redirectTarget
 	}
 
 	sm.innerState = rule.target
-	sm.currentState.Store(rule.boxedTarget)
+	sm.currentState.Store(rule.targetNode.boxedState)
 	sm.active = rule.targetNode
 
 	exitEffects := currentNode.exitEffect
