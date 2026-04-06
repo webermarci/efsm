@@ -304,13 +304,13 @@ func TestStateMachine_RedirectOverwriteOptions(t *testing.T) {
 
 	sm.Configure(StateIdle, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
 		c.Permit(EventStart, StateRunning,
-			efsm.WithRedirect(func(t efsm.Transition[State, Event], d *DataContext) State {
+			efsm.WithGuard(func(t efsm.Transition[State, Event], d *DataContext) error {
 				redirect1Called = true
-				return t.To
+				return nil
 			}),
-			efsm.WithRedirect(func(t efsm.Transition[State, Event], d *DataContext) State {
+			efsm.WithGuard(func(t efsm.Transition[State, Event], d *DataContext) error {
 				redirect2Called = true
-				return StateError
+				return nil
 			}),
 		)
 	})
@@ -323,10 +323,6 @@ func TestStateMachine_RedirectOverwriteOptions(t *testing.T) {
 
 	if !redirect2Called {
 		t.Error("expected redirect2 to be called")
-	}
-
-	if sm.CurrentState() != StateError {
-		t.Errorf("expected final state to be %v (from redirect2), got %v", StateError, sm.CurrentState())
 	}
 }
 

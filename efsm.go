@@ -56,8 +56,7 @@ func WithGuard[S comparable, E comparable, D any](guard Guard[S, E, D]) Transiti
 	}
 }
 
-// WithRedirect is a TransitionOption that sets a redirect function for a transition rule.
-func WithRedirect[S comparable, E comparable, D any](redirect Redirect[S, E, D]) TransitionOption[S, E, D] {
+func withRedirect[S comparable, E comparable, D any](redirect Redirect[S, E, D]) TransitionOption[S, E, D] {
 	return func(rule *TransitionRule[S, E, D]) {
 		rule.redirect = redirect
 	}
@@ -124,7 +123,7 @@ func (c *StateConfigurator[S, E, D]) Permit(event E, target S, opts ...Transitio
 
 // PermitRedirect defines a transition whose target state is determined dynamically at runtime.
 func (c *StateConfigurator[S, E, D]) PermitRedirect(event E, redirect Redirect[S, E, D], opts ...TransitionOption[S, E, D]) *StateConfigurator[S, E, D] {
-	allOpts := append([]TransitionOption[S, E, D]{WithRedirect(redirect)}, opts...)
+	allOpts := append([]TransitionOption[S, E, D]{withRedirect(redirect)}, opts...)
 	return c.Permit(event, c.state, allOpts...)
 }
 
