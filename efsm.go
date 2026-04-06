@@ -28,13 +28,13 @@ type Transition[S comparable, E comparable] struct {
 }
 
 // Guard defines a callback function executed during a state transition.
-type Guard[S comparable, E comparable, D any] func(transition Transition[S, E], data D) error
+type Guard[S comparable, E comparable, D any] func(t Transition[S, E], data D) error
 
 // Effect defines a callback function executed after a state transition has occurred.
-type Effect[S comparable, E comparable, D any] func(transition Transition[S, E], data D)
+type Effect[S comparable, E comparable, D any] func(t Transition[S, E], data D)
 
 // Redirect defines a callback function that can dynamically determine the target state during a transition.
-type Redirect[S comparable, E comparable, D any] func(transition Transition[S, E], data D) S
+type Redirect[S comparable, E comparable, D any] func(t Transition[S, E], data D) S
 
 // TransitionRule defines the outcome of an event, including the target state and an optional guard.
 type TransitionRule[S comparable, E comparable, D any] struct {

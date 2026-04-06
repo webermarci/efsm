@@ -66,12 +66,12 @@ func main() {
 	// Mixins can define standard logging, telemetry, or shared transitions.
 	// Their hooks will execute alongside the state-specific hooks!
 	withTelemetry := func(c *efsm.StateConfigurator[State, Event, Data]) {
-		c.OnEntry(func(t efsm.Transition[State, Event], d Data) {
+		c.OnEntry(func(t efsm.Transition[State, Event], data Data) {
 			fmt.Printf("[Telemetry] Entered state: %s\n", t.To)
 		})
 		
 		c.Permit(EventDisconnect, StateDisconnected, efsm.OnTransition(
-			func(t efsm.Transition[State, Event], d Data) {
+			func(t efsm.Transition[State, Event], data Data) {
 				fmt.Println("[Telemetry] Connection cleanly aborted.")
 			},
 		))
@@ -84,13 +84,13 @@ func main() {
 		withTelemetry, 
 		func(c *efsm.StateConfigurator[State, Event, Data]) {
 			// This OnEntry runs right after the telemetry OnEntry
-			c.OnEntry(func(t efsm.Transition[State, Event], d Data) {
-				fmt.Printf("⏳ Attempting connection to %s...\n", d.IPAddress)
+			c.OnEntry(func(t efsm.Transition[State, Event], data Data) {
+				fmt.Printf("⏳ Attempting connection to %s...\n", data.IPAddress)
 			})
 
 			c.Permit(EventSuccess, StateConnected, efsm.WithGuard(
-				func(t efsm.Transition[State, Event], d Data) error {
-					if d.IPAddress == "" {
+				func(t efsm.Transition[State, Event], data Data) error {
+					if data.IPAddress == "" {
 						return errors.New("missing IP address")
 					}
 					return nil
@@ -98,8 +98,8 @@ func main() {
 			))
 
 			// Dynamic redirect based on runtime context
-			c.PermitRedirect(EventError, func(t efsm.Transition[State, Event], d Data) State {
-				if d.RetryCount >= 3 {
+			c.PermitRedirect(EventError, func(t efsm.Transition[State, Event], data Data) State {
+				if data.RetryCount >= 3 {
 					return StateFailed
 				}
 				return StateDisconnected
@@ -155,14 +155,14 @@ To guarantee that state transitions are strictly atomic and ordered, `efsm` hold
 If an entry effect needs to trigger a subsequent state transition, you must spawn a new goroutine to push the event to the back of the line:
 ```go
 sm.Configure(StateConnecting, func(c *efsm.StateConfigurator[State, Event, Data]) {
-    c.OnEntry(func(t efsm.Transition[State, Event], d Data) {
+    c.OnEntry(func(t efsm.Transition[State, Event], data Data) {
         // Correct: Run async so the current transition can finish and release the lock
         go func() {
-            err := connectToNetwork(d.IPAddress)
+            err := connectToNetwork(data.IPAddress)
             if err != nil {
-                sm.Fire(EventError, d)
+                sm.Fire(EventError, data)
             } else {
-                sm.Fire(EventSuccess, d)
+                sm.Fire(EventSuccess, data)
             }
         }()
     })
