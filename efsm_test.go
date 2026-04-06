@@ -30,7 +30,9 @@ func TestStateMachine_BasicRouting(t *testing.T) {
 
 	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
 
-	sm.State(StateIdle).Permit(EventStart, StateRunning)
+	sm.Configure(StateIdle, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.Permit(EventStart, StateRunning)
+	})
 
 	if state := sm.CurrentState(); state != StateIdle {
 		t.Fatalf("expected initial state %v, got %v", StateIdle, state)
@@ -51,7 +53,9 @@ func TestStateMachine_InvalidEvent(t *testing.T) {
 
 	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
 
-	sm.State(StateIdle).Permit(EventStart, StateRunning)
+	sm.Configure(StateIdle, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.Permit(EventStart, StateRunning)
+	})
 
 	err := sm.Fire(EventFail, nil)
 	if err == nil {
@@ -89,11 +93,15 @@ func TestStateMachine_OnEntry(t *testing.T) {
 
 	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
 
-	sm.State(StateRunning).OnEntry(func(transition efsm.Transition[State, Event], data *DataContext) {
-		entryCalled = true
+	sm.Configure(StateIdle, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.Permit(EventStart, StateRunning)
 	})
 
-	sm.State(StateIdle).Permit(EventStart, StateRunning)
+	sm.Configure(StateRunning, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.OnEntry(func(transition efsm.Transition[State, Event], data *DataContext) {
+			entryCalled = true
+		})
+	})
 
 	err := sm.Fire(EventStart, nil)
 	if err != nil {
@@ -112,11 +120,12 @@ func TestStateMachine_OnExit(t *testing.T) {
 
 	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
 
-	sm.State(StateIdle).OnExit(func(transition efsm.Transition[State, Event], data *DataContext) {
-		exitCalled = true
+	sm.Configure(StateIdle, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.OnExit(func(transition efsm.Transition[State, Event], data *DataContext) {
+			exitCalled = true
+		})
+		c.Permit(EventStart, StateRunning)
 	})
-
-	sm.State(StateIdle).Permit(EventStart, StateRunning)
 
 	err := sm.Fire(EventStart, nil)
 	if err != nil {
@@ -135,14 +144,16 @@ func TestStateMachine_Guard(t *testing.T) {
 
 	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
 
-	sm.State(StateIdle).Permit(EventStart, StateRunning,
-		efsm.WithGuard(func(transition efsm.Transition[State, Event], data *DataContext) error {
-			if data.Retries >= 3 {
-				return errGuardFailed
-			}
-			return nil
-		}),
-	)
+	sm.Configure(StateIdle, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.Permit(EventStart, StateRunning,
+			efsm.WithGuard(func(transition efsm.Transition[State, Event], data *DataContext) error {
+				if data.Retries >= 3 {
+					return errGuardFailed
+				}
+				return nil
+			}),
+		)
+	})
 
 	err := sm.Fire(EventStart, &DataContext{Retries: 5})
 	if err == nil {
@@ -167,19 +178,19 @@ func TestStateMachine_Guard(t *testing.T) {
 	}
 }
 
-func TestStateMachine_Redirect(t *testing.T) {
+func TestStateMachine_PermitRedirect(t *testing.T) {
 	t.Parallel()
 
 	sm1 := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
 
-	sm1.State(StateIdle).Permit(EventStart, StateRunning,
-		efsm.WithRedirect(func(t efsm.Transition[State, Event], d *DataContext) State {
+	sm1.Configure(StateIdle, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.PermitRedirect(EventStart, func(t efsm.Transition[State, Event], d *DataContext) State {
 			if d.Retries > 3 {
 				return StateError
 			}
-			return t.To
-		}),
-	)
+			return StateRunning
+		})
+	})
 
 	err := sm1.Fire(EventStart, &DataContext{Retries: 2})
 	if err != nil {
@@ -192,14 +203,14 @@ func TestStateMachine_Redirect(t *testing.T) {
 
 	sm2 := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
 
-	sm2.State(StateIdle).Permit(EventStart, StateRunning,
-		efsm.WithRedirect(func(t efsm.Transition[State, Event], d *DataContext) State {
+	sm2.Configure(StateIdle, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.PermitRedirect(EventStart, func(t efsm.Transition[State, Event], d *DataContext) State {
 			if d.Retries > 3 {
 				return StateError
 			}
-			return t.To
-		}),
-	)
+			return StateRunning
+		})
+	})
 
 	err2 := sm2.Fire(EventStart, &DataContext{Retries: 5})
 	if err2 != nil {
@@ -216,11 +227,11 @@ func TestStateMachine_RedirectLoopPrevention(t *testing.T) {
 
 	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
 
-	sm.State(StateIdle).Permit(EventStart, StateRunning,
-		efsm.WithRedirect(func(t efsm.Transition[State, Event], d *DataContext) State {
+	sm.Configure(StateIdle, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.PermitRedirect(EventStart, func(t efsm.Transition[State, Event], d *DataContext) State {
 			return StateIdle
-		}),
-	)
+		})
+	})
 
 	err := sm.Fire(EventStart, nil)
 	if err == nil {
@@ -245,21 +256,24 @@ func TestStateMachine_RedirectEffectsContext(t *testing.T) {
 	var entryCalledForError bool
 	var entryCalledForRunning bool
 
-	sm.State(StateIdle).Permit(EventStart, StateRunning,
-		efsm.WithRedirect(func(t efsm.Transition[State, Event], d *DataContext) State {
+	sm.Configure(StateIdle, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.PermitRedirect(EventStart, func(t efsm.Transition[State, Event], d *DataContext) State {
 			return StateError
-		}),
-		efsm.OnTransition(func(t efsm.Transition[State, Event], d *DataContext) {
+		}, efsm.OnTransition(func(t efsm.Transition[State, Event], d *DataContext) {
 			targetInEffect = t.To
-		}),
-	)
-
-	sm.State(StateRunning).OnEntry(func(t efsm.Transition[State, Event], d *DataContext) {
-		entryCalledForRunning = true
+		}))
 	})
 
-	sm.State(StateError).OnEntry(func(t efsm.Transition[State, Event], d *DataContext) {
-		entryCalledForError = true
+	sm.Configure(StateRunning, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.OnEntry(func(t efsm.Transition[State, Event], d *DataContext) {
+			entryCalledForRunning = true
+		})
+	})
+
+	sm.Configure(StateError, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.OnEntry(func(t efsm.Transition[State, Event], d *DataContext) {
+			entryCalledForError = true
+		})
 	})
 
 	err := sm.Fire(EventStart, nil)
@@ -288,16 +302,18 @@ func TestStateMachine_RedirectOverwriteOptions(t *testing.T) {
 	redirect1Called := false
 	redirect2Called := false
 
-	sm.State(StateIdle).Permit(EventStart, StateRunning,
-		efsm.WithRedirect(func(t efsm.Transition[State, Event], d *DataContext) State {
-			redirect1Called = true
-			return t.To
-		}),
-		efsm.WithRedirect(func(t efsm.Transition[State, Event], d *DataContext) State {
-			redirect2Called = true
-			return StateError
-		}),
-	)
+	sm.Configure(StateIdle, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.Permit(EventStart, StateRunning,
+			efsm.WithRedirect(func(t efsm.Transition[State, Event], d *DataContext) State {
+				redirect1Called = true
+				return t.To
+			}),
+			efsm.WithRedirect(func(t efsm.Transition[State, Event], d *DataContext) State {
+				redirect2Called = true
+				return StateError
+			}),
+		)
+	})
 
 	_ = sm.Fire(EventStart, nil)
 
@@ -321,11 +337,13 @@ func TestStateMachine_Effect(t *testing.T) {
 
 	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
 
-	sm.State(StateIdle).Permit(EventStart, StateRunning,
-		efsm.OnTransition(func(transition efsm.Transition[State, Event], data *DataContext) {
-			effectCalled = true
-		}),
-	)
+	sm.Configure(StateIdle, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.Permit(EventStart, StateRunning,
+			efsm.OnTransition(func(transition efsm.Transition[State, Event], data *DataContext) {
+				effectCalled = true
+			}),
+		)
+	})
 
 	err := sm.Fire(EventStart, nil)
 	if err != nil {
@@ -351,18 +369,20 @@ func TestStateMachine_EffectExecutionOrder(t *testing.T) {
 		executionOrder = append(executionOrder, step)
 	}
 
-	sm.State(StateIdle).
-		OnExit(func(efsm.Transition[State, Event], *DataContext) {
+	sm.Configure(StateIdle, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.OnExit(func(efsm.Transition[State, Event], *DataContext) {
 			record("exit_idle")
-		}).
-		Permit(EventStart, StateRunning, efsm.OnTransition(func(efsm.Transition[State, Event], *DataContext) {
+		})
+		c.Permit(EventStart, StateRunning, efsm.OnTransition(func(efsm.Transition[State, Event], *DataContext) {
 			record("transition_start")
 		}))
+	})
 
-	sm.State(StateRunning).
-		OnEntry(func(efsm.Transition[State, Event], *DataContext) {
+	sm.Configure(StateRunning, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.OnEntry(func(efsm.Transition[State, Event], *DataContext) {
 			record("entry_running")
 		})
+	})
 
 	err := sm.Fire(EventStart, nil)
 	if err != nil {
@@ -386,6 +406,53 @@ func TestStateMachine_EffectExecutionOrder(t *testing.T) {
 	}
 }
 
+func TestStateMachine_MultipleMixinsEffects(t *testing.T) {
+	t.Parallel()
+
+	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
+
+	var executionOrder []string
+	var mu sync.Mutex
+
+	record := func(step string) {
+		mu.Lock()
+		defer mu.Unlock()
+		executionOrder = append(executionOrder, step)
+	}
+
+	mixin1 := func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.OnEntry(func(efsm.Transition[State, Event], *DataContext) {
+			record("mixin1_entry")
+		})
+	}
+
+	mixin2 := func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.OnEntry(func(efsm.Transition[State, Event], *DataContext) {
+			record("mixin2_entry")
+		})
+	}
+
+	sm.Configure(StateIdle, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.Permit(EventStart, StateRunning)
+	})
+
+	sm.Configure(StateRunning, mixin1, mixin2, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.OnEntry(func(efsm.Transition[State, Event], *DataContext) {
+			record("state_specific_entry")
+		})
+	})
+
+	_ = sm.Fire(EventStart, nil)
+
+	if len(executionOrder) != 3 {
+		t.Fatalf("expected 3 entry effects to fire via mixin composition, got %d", len(executionOrder))
+	}
+
+	if executionOrder[0] != "mixin1_entry" || executionOrder[1] != "mixin2_entry" || executionOrder[2] != "state_specific_entry" {
+		t.Errorf("unexpected mixin execution order: %v", executionOrder)
+	}
+}
+
 func TestStateMachine_SelfTransition(t *testing.T) {
 	t.Parallel()
 
@@ -400,12 +467,13 @@ func TestStateMachine_SelfTransition(t *testing.T) {
 		executionOrder = append(executionOrder, step)
 	}
 
-	sm.State(StateRunning).
-		OnExit(func(efsm.Transition[State, Event], *DataContext) { record("exit") }).
-		OnEntry(func(efsm.Transition[State, Event], *DataContext) { record("entry") }).
-		Permit(EventReset, StateRunning, efsm.OnTransition(func(efsm.Transition[State, Event], *DataContext) {
+	sm.Configure(StateRunning, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.OnExit(func(efsm.Transition[State, Event], *DataContext) { record("exit") })
+		c.OnEntry(func(efsm.Transition[State, Event], *DataContext) { record("entry") })
+		c.Permit(EventReset, StateRunning, efsm.OnTransition(func(efsm.Transition[State, Event], *DataContext) {
 			record("transition")
 		}))
+	})
 
 	err := sm.Fire(EventReset, nil)
 	if err != nil {
@@ -433,22 +501,24 @@ func TestStateMachine_OverwriteOptions(t *testing.T) {
 	guard1Called, guard2Called := false, false
 	effect1Called, effect2Called := false, false
 
-	sm.State(StateIdle).Permit(EventStart, StateRunning,
-		efsm.WithGuard(func(efsm.Transition[State, Event], *DataContext) error {
-			guard1Called = true
-			return nil
-		}),
-		efsm.WithGuard(func(efsm.Transition[State, Event], *DataContext) error {
-			guard2Called = true
-			return nil
-		}),
-		efsm.OnTransition(func(efsm.Transition[State, Event], *DataContext) {
-			effect1Called = true
-		}),
-		efsm.OnTransition(func(efsm.Transition[State, Event], *DataContext) {
-			effect2Called = true
-		}),
-	)
+	sm.Configure(StateIdle, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.Permit(EventStart, StateRunning,
+			efsm.WithGuard(func(efsm.Transition[State, Event], *DataContext) error {
+				guard1Called = true
+				return nil
+			}),
+			efsm.WithGuard(func(efsm.Transition[State, Event], *DataContext) error {
+				guard2Called = true
+				return nil
+			}),
+			efsm.OnTransition(func(efsm.Transition[State, Event], *DataContext) {
+				effect1Called = true
+			}),
+			efsm.OnTransition(func(efsm.Transition[State, Event], *DataContext) {
+				effect2Called = true
+			}),
+		)
+	})
 
 	_ = sm.Fire(EventStart, nil)
 
@@ -477,11 +547,13 @@ func TestStateMachine_DataPropagation(t *testing.T) {
 
 	var dataObserved *DataContext
 
-	sm.State(StateIdle).Permit(EventStart, StateRunning,
-		efsm.OnTransition(func(_ efsm.Transition[State, Event], d *DataContext) {
-			dataObserved = d
-		}),
-	)
+	sm.Configure(StateIdle, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.Permit(EventStart, StateRunning,
+			efsm.OnTransition(func(_ efsm.Transition[State, Event], d *DataContext) {
+				dataObserved = d
+			}),
+		)
+	})
 
 	_ = sm.Fire(EventStart, testData)
 
@@ -495,9 +567,10 @@ func TestStateMachine_AvailableStates(t *testing.T) {
 
 	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
 
-	sm.State(StateIdle).
-		Permit(EventStart, StateRunning).
-		Permit(EventFail, StateError)
+	sm.Configure(StateIdle, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.Permit(EventStart, StateRunning)
+		c.Permit(EventFail, StateError)
+	})
 
 	states := sm.AvailableStates()
 	if len(states) != 3 {
@@ -521,9 +594,10 @@ func TestStateMachine_AvailableEvents(t *testing.T) {
 
 	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
 
-	sm.State(StateIdle).
-		Permit(EventStart, StateRunning).
-		Permit(EventFail, StateError)
+	sm.Configure(StateIdle, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.Permit(EventStart, StateRunning)
+		c.Permit(EventFail, StateError)
+	})
 
 	events := sm.AvailableEvents()
 	if len(events) != 2 {
@@ -552,12 +626,14 @@ func TestStateMachine_AvailableEventsForStates(t *testing.T) {
 
 	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
 
-	sm.State(StateIdle).
-		Permit(EventStart, StateRunning).
-		Permit(EventFail, StateError)
+	sm.Configure(StateIdle, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.Permit(EventStart, StateRunning)
+		c.Permit(EventFail, StateError)
+	})
 
-	sm.State(StateRunning).
-		Permit(EventReset, StateIdle)
+	sm.Configure(StateRunning, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.Permit(EventReset, StateIdle)
+	})
 
 	eventsForStates := sm.AvailableEventsForStates()
 
@@ -591,13 +667,50 @@ func TestStateMachine_AvailableEventsForStates_Empty(t *testing.T) {
 	}
 }
 
+func TestStateMachine_CanFire(t *testing.T) {
+	t.Parallel()
+
+	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
+
+	sm.Configure(StateIdle, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.Permit(EventStart, StateRunning)
+	})
+
+	if !sm.CanFire(EventStart) {
+		t.Errorf("expected CanFire to return true for valid event")
+	}
+
+	if sm.CanFire(EventFail) {
+		t.Errorf("expected CanFire to return false for invalid event")
+	}
+}
+
+func TestStateMachine_MustFire(t *testing.T) {
+	t.Parallel()
+
+	sm := efsm.NewStateMachine[State, Event, *DataContext](StateIdle)
+
+	sm.Configure(StateIdle, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.Permit(EventStart, StateRunning)
+	})
+
+	// This should panic
+	defer func() {
+		if r := recover(); r == nil {
+			t.Errorf("expected MustFire to panic on invalid transition")
+		}
+	}()
+
+	sm.MustFire(EventFail, nil)
+}
+
 func TestStateMachine_Concurrency(t *testing.T) {
 	t.Parallel()
 
 	sm := efsm.NewStateMachine[int, int, any](0)
 
-	sm.State(0).Permit(1, 1)
-	sm.State(1).Permit(0, 0)
+	sm.Configure(0, func(c *efsm.StateConfigurator[int, int, any]) { c.Permit(1, 1) })
+	sm.Configure(1, func(c *efsm.StateConfigurator[int, int, any]) { c.Permit(0, 0) })
 
 	var wg sync.WaitGroup
 	workers := 100
@@ -624,8 +737,8 @@ func TestStateMachine_Concurrency(t *testing.T) {
 func BenchmarkStateMachine_Fire(b *testing.B) {
 	sm := efsm.NewStateMachine[int, int, any](0)
 
-	sm.State(0).Permit(1, 1)
-	sm.State(1).Permit(0, 0)
+	sm.Configure(0, func(c *efsm.StateConfigurator[int, int, any]) { c.Permit(1, 1) })
+	sm.Configure(1, func(c *efsm.StateConfigurator[int, int, any]) { c.Permit(0, 0) })
 
 	b.ResetTimer()
 
@@ -635,17 +748,19 @@ func BenchmarkStateMachine_Fire(b *testing.B) {
 	}
 }
 
-func BenchmarkStateMachine_FireWithEffects(b *testing.B) {
+func BenchmarkStateMachine_FireEffects(b *testing.B) {
 	sm := efsm.NewStateMachine[int, int, any](0)
 
-	sm.State(0).
-		OnExit(func(efsm.Transition[int, int], any) {}).
-		Permit(1, 1, efsm.WithGuard(func(efsm.Transition[int, int], any) error { return nil }),
+	sm.Configure(0, func(c *efsm.StateConfigurator[int, int, any]) {
+		c.OnExit(func(efsm.Transition[int, int], any) {})
+		c.Permit(1, 1, efsm.WithGuard(func(efsm.Transition[int, int], any) error { return nil }),
 			efsm.OnTransition(func(efsm.Transition[int, int], any) {}))
+	})
 
-	sm.State(1).
-		OnEntry(func(efsm.Transition[int, int], any) {}).
-		Permit(0, 0)
+	sm.Configure(1, func(c *efsm.StateConfigurator[int, int, any]) {
+		c.OnEntry(func(efsm.Transition[int, int], any) {})
+		c.Permit(0, 0)
+	})
 
 	b.ResetTimer()
 
@@ -670,8 +785,8 @@ func BenchmarkStateMachine_State_Parallel(b *testing.B) {
 func BenchmarkStateMachine_Fire_Parallel(b *testing.B) {
 	sm := efsm.NewStateMachine[int, int, any](0)
 
-	sm.State(0).Permit(1, 1)
-	sm.State(1).Permit(0, 0)
+	sm.Configure(0, func(c *efsm.StateConfigurator[int, int, any]) { c.Permit(1, 1) })
+	sm.Configure(1, func(c *efsm.StateConfigurator[int, int, any]) { c.Permit(0, 0) })
 
 	b.ResetTimer()
 
@@ -687,15 +802,19 @@ func BenchmarkStateMachine_Fire_Parallel(b *testing.B) {
 	})
 }
 
-func BenchmarkStateMachine_FireWithRedirect(b *testing.B) {
+func BenchmarkStateMachine_FireRedirect(b *testing.B) {
 	sm := efsm.NewStateMachine[int, int, any](0)
 
-	sm.State(0).Permit(1, 0, efsm.WithRedirect(func(efsm.Transition[int, int], any) int {
-		return 1
-	}))
-	sm.State(1).Permit(0, 1, efsm.WithRedirect(func(efsm.Transition[int, int], any) int {
-		return 0
-	}))
+	sm.Configure(0, func(c *efsm.StateConfigurator[int, int, any]) {
+		c.PermitRedirect(1, func(efsm.Transition[int, int], any) int {
+			return 1
+		})
+	})
+	sm.Configure(1, func(c *efsm.StateConfigurator[int, int, any]) {
+		c.PermitRedirect(0, func(efsm.Transition[int, int], any) int {
+			return 0
+		})
+	})
 
 	b.ResetTimer()
 
@@ -708,15 +827,19 @@ func BenchmarkStateMachine_FireWithRedirect(b *testing.B) {
 	}
 }
 
-func BenchmarkStateMachine_FireWithRedirect_Parallel(b *testing.B) {
+func BenchmarkStateMachine_FireRedirect_Parallel(b *testing.B) {
 	sm := efsm.NewStateMachine[int, int, any](0)
 
-	sm.State(0).Permit(1, 0, efsm.WithRedirect(func(efsm.Transition[int, int], any) int {
-		return 1
-	}))
-	sm.State(1).Permit(0, 1, efsm.WithRedirect(func(efsm.Transition[int, int], any) int {
-		return 0
-	}))
+	sm.Configure(0, func(c *efsm.StateConfigurator[int, int, any]) {
+		c.PermitRedirect(1, func(efsm.Transition[int, int], any) int {
+			return 1
+		})
+	})
+	sm.Configure(1, func(c *efsm.StateConfigurator[int, int, any]) {
+		c.PermitRedirect(0, func(efsm.Transition[int, int], any) int {
+			return 0
+		})
+	})
 
 	b.ResetTimer()
 

@@ -10,11 +10,20 @@ It is relentlessly optimized for high-throughput, highly concurrent environments
 
 ## Features
 
-- Type-safe states and events using Go generics.
-- Thread-safe state transitions with 100% lock-free reads and mutually exclusive writes.
-- Fluent builder pattern for clean and intuitive configuration.
-- Transition guards that support custom data payloads.
-- Dynamic conditional routing at runtime (`WithRedirect`).
+- **Zero-Allocation Hot Path:** Transitioning states (`Fire`) requires 0 heap allocations.
+- **Type-Safe Generics:** Define your own state and event types without empty interfaces (`interface{}` or `any`).
+- **Highly Concurrent:** 100% lock-free reads (`CurrentState`), mutually exclusive writes, and CPU cache-line padding to prevent false sharing.
+- **Composable Mixins:** Use the `Configure` API to write reusable state logic (like telemetry or error handling) and apply it across multiple states.
+- **Dynamic Routing:** Resolve target states dynamically at runtime based on data context (`PermitRedirect`).
+- **Guards & Effects:** Hook into state transitions with `WithGuard`, `OnEntry`, `OnExit`, and `OnTransition`.
+
+## Installation
+
+Requires Go 1.18 or later (uses Generics).
+
+```bash
+go get github.com/webermarci/efsm
+```
 
 ## Quick start
 
@@ -42,79 +51,122 @@ const (
 	EventDisconnect Event = "Disconnect"
 	EventSuccess    Event = "Success"
 	EventError      Event = "Error"
+	EventTimeout    Event = "Timeout"
 )
 
-// 2. Define the generic data payload passed to hooks
 type Data struct {
 	RetryCount int
 	IPAddress  string
 }
 
 func main() {
-	// Initialize the state machine with the starting state
 	sm := efsm.NewStateMachine[State, Event, Data](StateDisconnected)
 
-	// 3. Declaratively configure the state rules and transitions
-	sm.State(StateDisconnected).
-		OnEntry(func(t efsm.Transition[State, Event], d Data) {
-			fmt.Println("🔌 Hook: Device is safely disconnected.")
-		}).
-		Permit(EventConnect, StateConnecting)
-
-	sm.State(StateConnecting).
-		OnEntry(func(t efsm.Transition[State, Event], d Data) {
-			fmt.Printf("⏳ Hook: Attempting connection to %s...\n", d.IPAddress)
-		}).
-		// Use a Guard to reject the transition if parameters are invalid
-		Permit(EventSuccess, StateConnected, efsm.WithGuard(
-			func(t efsm.Transition[State, Event], d Data) error {
-				if d.IPAddress == "" {
-					return errors.New("missing IP address")
-				}
-				return nil
-			},
-		)).
-		// Use a dynamic redirect to evaluate runtime data and choose the target state
-		Permit(EventError, StateDisconnected, efsm.WithRedirect(
-			func(t efsm.Transition[State, Event], d Data) State {
-				if d.RetryCount >= 3 {
-					return StateFailed // Out of retries, route to Failed state
-				}
-				return t.To // Fallback to default target (Disconnected)
-			},
-		)).
-		// Add an effect specific to this transition
-		Permit(EventDisconnect, StateDisconnected, efsm.OnTransition(
+	// --- 2. Define Reusable Mixins ---
+	// Mixins can define standard logging, telemetry, or shared transitions.
+	// Their hooks will execute alongside the state-specific hooks!
+	withTelemetry := func(c *efsm.StateConfigurator[State, Event, Data]) {
+		c.OnEntry(func(t efsm.Transition[State, Event], d Data) {
+			fmt.Printf("[Telemetry] Entered state: %s\n", t.To)
+		})
+		
+		c.Permit(EventDisconnect, StateDisconnected, efsm.OnTransition(
 			func(t efsm.Transition[State, Event], d Data) {
-				fmt.Println("⚠️ Effect: Connection aborted by user.")
+				fmt.Println("[Telemetry] Connection cleanly aborted.")
 			},
 		))
+	}
 
-	sm.State(StateConnected).
-		OnEntry(func(t efsm.Transition[State, Event], d Data) {
-			fmt.Println("✅ Hook: Connection established successfully!")
-		}).
-		Permit(EventDisconnect, StateDisconnected)
+	// --- 3. Configure States ---
+	sm.Configure(StateDisconnected)
 
-	sm.State(StateFailed).
-		OnEntry(func(t efsm.Transition[State, Event], d Data) {
-			fmt.Println("🚨 Hook: Connection failed permanently.")
-		}).
-		Permit(EventConnect, StateConnecting) // Allow manual retry
+	sm.Configure(StateConnecting, 
+		withTelemetry, 
+		func(c *efsm.StateConfigurator[State, Event, Data]) {
+			// This OnEntry runs right after the telemetry OnEntry
+			c.OnEntry(func(t efsm.Transition[State, Event], d Data) {
+				fmt.Printf("⏳ Attempting connection to %s...\n", d.IPAddress)
+			})
 
-	// 4. Execute the state machine
+			c.Permit(EventSuccess, StateConnected, efsm.WithGuard(
+				func(t efsm.Transition[State, Event], d Data) error {
+					if d.IPAddress == "" {
+						return errors.New("missing IP address")
+					}
+					return nil
+				},
+			))
+
+			// Dynamic redirect based on runtime context
+			c.PermitRedirect(EventError, func(t efsm.Transition[State, Event], d Data) State {
+				if d.RetryCount >= 3 {
+					return StateFailed
+				}
+				return StateDisconnected
+			})
+
+			for _, event := range []Event{EventTimeout} {
+				c.Permit(event, StateFailed)
+			}
+		},
+	)
+
+	sm.Configure(StateConnected, 
+		withTelemetry,
+		func(c *efsm.StateConfigurator[State, Event, Data]) {
+			c.OnEntry(func(t efsm.Transition[State, Event], d Data) {
+				fmt.Println("✅ Connection established successfully!")
+			})
+		},
+	)
+
+	sm.Configure(StateFailed, func(c *efsm.StateConfigurator[State, Event, Data]) {
+		c.Permit(EventConnect, StateConnecting)
+	})
+
+	// --- 4. Execute ---
 	payload := Data{RetryCount: 3, IPAddress: "192.168.1.100"}
 
-	fmt.Printf("Initial State: %s\n", sm.CurrentState())
+	// Use CanFire to check if an action is valid before trying it (great for UI rendering)
+	if sm.CanFire(EventConnect) {
+		fmt.Println("Button 'Connect' is enabled.")
+	}
 
-	// Fire: Disconnected -> Connecting
-	_ = sm.Fire(EventConnect, payload)
-	fmt.Printf("Current State: %s\n\n", sm.CurrentState())
+	// Use MustFire when you are programmatically certain the event is valid
+	// and want a panic on developer error instead of checking err != nil
+	sm.MustFire(EventConnect, payload)
 
-	// Fire: Connecting -> Failed (Redirect dynamically overrides Disconnected)
-	_ = sm.Fire(EventError, payload)
-	fmt.Printf("Current State: %s\n\n", sm.CurrentState())
+	// Normal Fire for events that might be rejected by a guard or state mismatch
+	err := sm.Fire(EventError, payload)
+	if err != nil {
+		fmt.Printf("Failed to fire: %v\n", err)
+	}
+	
+	fmt.Printf("\nFinal State: %s\n", sm.CurrentState())
 }
+```
+
+## Important Notes on Concurrency
+
+To guarantee that state transitions are strictly atomic and ordered, `efsm` holds an internal lock during the execution of a transition and its associated effects (`OnExit`, `OnTransition`, `OnEntry`).
+
+**⚠️ Warning:** You **MUST NOT** call `sm.Fire()`, `sm.CanFire()`, or `sm.MustFire()` synchronously from within an effect or guard. Doing so will cause a deadlock.
+
+If an entry effect needs to trigger a subsequent state transition, you must spawn a new goroutine to push the event to the back of the line:
+```go
+sm.Configure(StateConnecting, func(c *efsm.StateConfigurator[State, Event, Data]) {
+    c.OnEntry(func(t efsm.Transition[State, Event], d Data) {
+        // Correct: Run async so the current transition can finish and release the lock
+        go func() {
+            err := connectToNetwork(d.IPAddress)
+            if err != nil {
+                sm.Fire(EventError, d)
+            } else {
+                sm.Fire(EventSuccess, d)
+            }
+        }()
+    })
+})
 ```
 
 ## Benchmark
@@ -124,10 +176,10 @@ goos: darwin
 goarch: arm64
 pkg: github.com/webermarci/efsm
 cpu: Apple M5
-BenchmarkStateMachine_Fire-10                      152293412   7.63 ns/op  0 B/op  0 allocs/op
-BenchmarkStateMachine_FireWithEffects-10           144341641   8.32 ns/op  0 B/op  0 allocs/op
-BenchmarkStateMachine_State_Parallel-10           1000000000   0.20 ns/op  0 B/op  0 allocs/op
-BenchmarkStateMachine_Fire_Parallel-10              19826025  59.61 ns/op  0 B/op  0 allocs/op
-BenchmarkStateMachine_FireWithRedirect-10          122129552  9.819 ns/op  0 B/op  0 allocs/op
-BenchmarkStateMachine_FireWithRedirect_Parallel-10  17619495  68.29 ns/op  0 B/op  0 allocs/op
+BenchmarkStateMachine_Fire-10                   124017261    9.43 ns/op   0 B/op   0 allocs/op
+BenchmarkStateMachine_FireEffects-10            121889860    9.86 ns/op   0 B/op   0 allocs/op
+BenchmarkStateMachine_State_Parallel-10        1000000000    0.19 ns/op   0 B/op   0 allocs/op
+BenchmarkStateMachine_Fire_Parallel-10           17264893   68.48 ns/op   0 B/op   0 allocs/op
+BenchmarkStateMachine_FireRedirect-10           100000000   11.50 ns/op   0 B/op   0 allocs/op
+BenchmarkStateMachine_FireRedirect_Parallel-10   17193207   69.46 ns/op   0 B/op   0 allocs/op
 ```
