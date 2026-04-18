@@ -17,14 +17,6 @@ It is relentlessly optimized for high-throughput, highly concurrent environments
 - **Dynamic Routing:** Resolve target states dynamically at runtime based on data context (`PermitRedirect`).
 - **Guards & Effects:** Hook into state transitions with `WithGuard`, `OnEntry`, `OnExit`, and `OnTransition`.
 
-## Installation
-
-Requires Go 1.18 or later (uses Generics).
-
-```bash
-go get github.com/webermarci/efsm
-```
-
 ## Quick start
 
 ```go
@@ -177,6 +169,7 @@ goarch: arm64
 pkg: github.com/webermarci/efsm
 cpu: Apple M5
 BenchmarkStateMachine_Fire-10                   124017261    9.43 ns/op   0 B/op   0 allocs/op
+BenchmarkStateMachine_FireObserver-10            42548539   28.11 ns/op   0 B/op   0 allocs/op
 BenchmarkStateMachine_FireEffects-10            121889860    9.86 ns/op   0 B/op   0 allocs/op
 BenchmarkStateMachine_State_Parallel-10        1000000000    0.19 ns/op   0 B/op   0 allocs/op
 BenchmarkStateMachine_Fire_Parallel-10           17264893   68.48 ns/op   0 B/op   0 allocs/op

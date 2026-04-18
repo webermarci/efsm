@@ -20,6 +20,15 @@ var (
 	ErrSelfRedirect = errors.New("transition cannot redirect to the source state")
 )
 
+// Observer provides a set of callbacks that can be used to observe state machine behavior.
+type Observer[S comparable, E comparable, D any] struct {
+	OnTransitioning func(t Transition[S, E], data D)
+	OnRedirected    func(t Transition[S, E], newTarget S, data D)
+	OnGuardFiltered func(t Transition[S, E], err error, data D)
+	OnTransitioned  func(t Transition[S, E], data D)
+	OnInvalidEvent  func(t Transition[S, E], data D)
+}
+
 // Transition represents a state change triggered by an event.
 type Transition[S comparable, E comparable] struct {
 	From  S
@@ -132,26 +141,42 @@ type stateData[S comparable, E comparable, D any] struct {
 	exitEffect  []Effect[S, E, D]
 }
 
+// StateMachineOption is a functional option type for configuring the state machine.
+type StateMachineOption[S comparable, E comparable, D any] func(*StateMachine[S, E, D])
+
+// WithObserver is a StateMachineOption that sets an observer for the state machine.
+func WithObserver[S comparable, E comparable, D any](observer *Observer[S, E, D]) StateMachineOption[S, E, D] {
+	return func(sm *StateMachine[S, E, D]) {
+		sm.observer = observer
+	}
+}
+
 // StateMachine is a running finite state machine instance. It is safe for
 // concurrent use. CurrentState provides 100% lock-free reads.
 type StateMachine[S comparable, E comparable, D any] struct {
 	currentState atomic.Value
 	_            [64]byte
-
-	mutex      sync.RWMutex
-	innerState S
-	active     *stateData[S, E, D]
-
-	states map[S]*stateData[S, E, D]
+	mutex        sync.RWMutex
+	innerState   S
+	active       *stateData[S, E, D]
+	states       map[S]*stateData[S, E, D]
+	observer     *Observer[S, E, D]
 }
 
-// NewStateMachine creates a new StateMachine with the specified initial state.
-func NewStateMachine[S comparable, E comparable, D any](initial S) *StateMachine[S, E, D] {
+// NewStateMachine creates a new StateMachine with the specified initial state and optional configuration options. The initial state is registered automatically.
+func NewStateMachine[S comparable, E comparable, D any](initial S, opts ...StateMachineOption[S, E, D]) *StateMachine[S, E, D] {
 	boxedInitial := any(initial)
 	sm := &StateMachine[S, E, D]{
 		innerState: initial,
 		states:     make(map[S]*stateData[S, E, D]),
 	}
+
+	for _, opt := range opts {
+		if opt != nil {
+			opt(sm)
+		}
+	}
+
 	sm.active = sm.getOrCreateNode(initial)
 	sm.currentState.Store(boxedInitial)
 	return sm
@@ -273,19 +298,38 @@ func (sm *StateMachine[S, E, D]) Fire(event E, data D) error {
 
 	currentNode := sm.active
 
+	transition := Transition[S, E]{
+		From:  sm.innerState,
+		To:    sm.innerState,
+		Event: event,
+	}
+
 	if currentNode.transitions == nil {
+		if sm.observer != nil && sm.observer.OnInvalidEvent != nil {
+			sm.observer.OnInvalidEvent(transition, data)
+		}
 		return ErrNoTransitions
 	}
 
 	rule, validEvent := currentNode.transitions[event]
 	if !validEvent {
+		if sm.observer != nil && sm.observer.OnInvalidEvent != nil {
+			sm.observer.OnInvalidEvent(transition, data)
+		}
 		return ErrInvalidEvent
 	}
 
-	transition := Transition[S, E]{From: sm.innerState, To: rule.target, Event: event}
+	transition.To = rule.target
+
+	if sm.observer != nil && sm.observer.OnTransitioning != nil {
+		sm.observer.OnTransitioning(transition, data)
+	}
 
 	if rule.guard != nil {
 		if err := rule.guard(transition, data); err != nil {
+			if sm.observer != nil && sm.observer.OnGuardFiltered != nil {
+				sm.observer.OnGuardFiltered(transition, err, data)
+			}
 			return err
 		}
 	}
@@ -297,9 +341,12 @@ func (sm *StateMachine[S, E, D]) Fire(event E, data D) error {
 			return ErrSelfRedirect
 		}
 
+		if sm.observer != nil && sm.observer.OnRedirected != nil {
+			sm.observer.OnRedirected(transition, redirectTarget, data)
+		}
+
 		rule.target = redirectTarget
 		rule.targetNode = sm.getOrCreateNode(redirectTarget)
-
 		transition.To = redirectTarget
 	}
 
@@ -307,20 +354,20 @@ func (sm *StateMachine[S, E, D]) Fire(event E, data D) error {
 	sm.currentState.Store(rule.targetNode.boxedState)
 	sm.active = rule.targetNode
 
-	exitEffects := currentNode.exitEffect
-	transitionEffect := rule.effect
-	entryEffects := rule.targetNode.entryEffect
-
-	for _, effect := range exitEffects {
+	for _, effect := range currentNode.exitEffect {
 		effect(transition, data)
 	}
 
-	if transitionEffect != nil {
-		transitionEffect(transition, data)
+	if rule.effect != nil {
+		rule.effect(transition, data)
 	}
 
-	for _, effect := range entryEffects {
+	for _, effect := range rule.targetNode.entryEffect {
 		effect(transition, data)
+	}
+
+	if sm.observer != nil && sm.observer.OnTransitioned != nil {
+		sm.observer.OnTransitioned(transition, data)
 	}
 
 	return nil

@@ -730,6 +730,101 @@ func TestStateMachine_Concurrency(t *testing.T) {
 	wg.Wait()
 }
 
+func TestStateMachine_ObserverHooks(t *testing.T) {
+	t.Parallel()
+
+	type logEntry struct {
+		hook  string
+		from  State
+		to    State
+		event Event
+	}
+
+	var mu sync.Mutex
+	var logs []logEntry
+
+	record := func(hook string, tr efsm.Transition[State, Event]) {
+		mu.Lock()
+		defer mu.Unlock()
+		logs = append(logs, logEntry{hook: hook, from: tr.From, to: tr.To, event: tr.Event})
+	}
+
+	obs := &efsm.Observer[State, Event, *DataContext]{
+		OnTransitioning: func(tr efsm.Transition[State, Event], d *DataContext) {
+			record("transitioning", tr)
+		},
+		OnTransitioned: func(tr efsm.Transition[State, Event], d *DataContext) {
+			record("transitioned", tr)
+		},
+		OnRedirected: func(tr efsm.Transition[State, Event], newTarget State, d *DataContext) {
+			record("redirected", tr)
+		},
+		OnGuardFiltered: func(tr efsm.Transition[State, Event], err error, d *DataContext) {
+			record("guard_filtered", tr)
+		},
+		OnInvalidEvent: func(tr efsm.Transition[State, Event], d *DataContext) {
+			record("invalid_event", tr)
+		},
+	}
+
+	sm := efsm.NewStateMachine(StateIdle, efsm.WithObserver(obs))
+
+	sm.Configure(StateIdle, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.Permit(EventStart, StateRunning)
+
+		c.Permit(EventFail, StateError, efsm.WithGuard(func(tr efsm.Transition[State, Event], d *DataContext) error {
+			return errors.New("blocked")
+		}))
+
+		c.PermitRedirect(EventReset, func(tr efsm.Transition[State, Event], d *DataContext) State {
+			return StateError
+		})
+	})
+
+	_ = sm.Fire(EventStart, nil)
+
+	_ = sm.Fire(EventStart, nil)
+
+	sm.Configure(StateRunning, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.Permit(EventReset, StateIdle)
+	})
+
+	_ = sm.Fire(EventReset, nil)
+
+	_ = sm.Fire(EventFail, nil)
+
+	sm.Configure(StateIdle, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.Permit(EventReset, StateIdle)
+	})
+	_ = sm.Fire(EventReset, nil)
+
+	sm.Configure(StateIdle, func(c *efsm.StateConfigurator[State, Event, *DataContext]) {
+		c.PermitRedirect(EventReset, func(tr efsm.Transition[State, Event], d *DataContext) State {
+			return StateError
+		})
+	})
+	_ = sm.Fire(EventReset, nil)
+
+	expectedSteps := []string{
+		"transitioning", "transitioned",
+		"invalid_event",
+		"transitioning", "transitioned",
+		"transitioning", "guard_filtered",
+		"transitioning", "transitioned",
+		"transitioning", "redirected", "transitioned",
+	}
+
+	if len(logs) != len(expectedSteps) {
+		t.Fatalf("expected %d observer calls, got %d", len(expectedSteps), len(logs))
+	}
+
+	for i, step := range expectedSteps {
+		if logs[i].hook != step {
+			t.Errorf("at step %d: expected hook %s, got %s", i, step, logs[i].hook)
+		}
+	}
+}
+
 func BenchmarkStateMachine_Fire(b *testing.B) {
 	sm := efsm.NewStateMachine[int, int, any](0)
 
@@ -741,6 +836,27 @@ func BenchmarkStateMachine_Fire(b *testing.B) {
 	for i := 0; b.Loop(); i++ {
 		event := i % 2
 		_ = sm.Fire(event, nil)
+	}
+}
+
+func BenchmarkStateMachine_FireObserver(b *testing.B) {
+	var count int
+	obs := &efsm.Observer[State, Event, any]{
+		OnTransitioning: func(t efsm.Transition[State, Event], d any) { count++ },
+		OnTransitioned:  func(t efsm.Transition[State, Event], d any) { count++ },
+	}
+
+	sm := efsm.NewStateMachine(StateIdle, efsm.WithObserver(obs))
+	sm.Configure(StateIdle, func(c *efsm.StateConfigurator[State, Event, any]) {
+		c.Permit(EventStart, StateRunning)
+	})
+	sm.Configure(StateRunning, func(c *efsm.StateConfigurator[State, Event, any]) {
+		c.Permit(EventReset, StateIdle)
+	})
+
+	for b.Loop() {
+		_ = sm.Fire(EventStart, nil)
+		_ = sm.Fire(EventReset, nil)
 	}
 }
 
