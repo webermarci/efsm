@@ -4,18 +4,26 @@
 [![Test](https://github.com/webermarci/efsm/actions/workflows/test.yml/badge.svg)](https://github.com/webermarci/efsm/actions/workflows/test.yml)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
-`efsm` is a generic, thread-safe, extended finite state machine (EFSM) for Go. It provides a fluent builder API to define states, events, and transition guards, making it easy to model complex logic safely in concurrent environments.
-
-It is relentlessly optimized for high-throughput, highly concurrent environments. It features a zero-allocation pointer-graph architecture, 100% lock-free reads, and CPU cache-line padding to prevent false sharing.
+`efsm` is a small, generic, thread-safe extended finite state machine for Go.
+It provides immutable, constructor-time configuration for states, events,
+guards, redirects, and effects.
 
 ## Features
 
-- **Zero-Allocation Hot Path:** Transitioning states (`Fire`) requires 0 heap allocations.
-- **Type-Safe Generics:** Define your own state and event types without empty interfaces (`interface{}` or `any`).
-- **Highly Concurrent:** 100% lock-free reads (`CurrentState`), mutually exclusive writes, and CPU cache-line padding to prevent false sharing.
-- **Composable Mixins:** Use the `Configure` API to write reusable state logic (like telemetry or error handling) and apply it across multiple states.
-- **Dynamic Routing:** Resolve target states dynamically at runtime based on data context (`PermitRedirect`).
-- **Guards & Effects:** Hook into state transitions with `WithGuard`, `OnEntry`, `OnExit`, and `OnTransition`.
+- **Immutable configuration:** The transition graph is frozen by `NewStateMachine`.
+- **Type-safe states and events:** State and event types are generic and comparable.
+- **Safe concurrency:** Transitions are serialized; current-state and inspection reads are safe concurrently.
+- **Reusable options:** State behavior is grouped with `WithState`, while individual options can be reused across states.
+- **Guards and effects:** Use `WithGuard`, `OnEntry`, `OnExit`, and `OnTransition`.
+- **Dynamic routing:** Use `WithPermitRedirect` when the target depends on event data.
+
+## Installation
+
+```bash
+go get github.com/webermarci/efsm
+```
+
+The module requires Go 1.26.2 or newer.
 
 ## Quick start
 
@@ -23,156 +31,146 @@ It is relentlessly optimized for high-throughput, highly concurrent environments
 package main
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/webermarci/efsm"
 )
 
-// 1. Define states and events as strongly typed aliases
 type State string
 type Event string
 
 const (
-	StateDisconnected State = "Disconnected"
-	StateConnecting   State = "Connecting"
-	StateConnected    State = "Connected"
-	StateFailed       State = "Failed"
+	Disconnected State = "disconnected"
+	Connecting   State = "connecting"
+	Connected    State = "connected"
+	Failed       State = "failed"
 
-	EventConnect    Event = "Connect"
-	EventDisconnect Event = "Disconnect"
-	EventSuccess    Event = "Success"
-	EventError      Event = "Error"
-	EventTimeout    Event = "Timeout"
+	Connect    Event = "connect"
+	Success    Event = "success"
+	Failure    Event = "failure"
+	Reset      Event = "reset"
 )
 
 type Data struct {
 	RetryCount int
-	IPAddress  string
 }
 
 func main() {
-	sm := efsm.NewStateMachine[State, Event, Data](StateDisconnected)
-
-	// --- 2. Define Reusable Mixins ---
-	// Mixins can define standard logging, telemetry, or shared transitions.
-	// Their hooks will execute alongside the state-specific hooks!
-	withTelemetry := func(c *efsm.StateConfigurator[State, Event, Data]) {
-		c.OnEntry(func(t efsm.Transition[State, Event], data Data) {
-			fmt.Printf("[Telemetry] Entered state: %s\n", t.To)
-		})
-		
-		c.Permit(EventDisconnect, StateDisconnected, efsm.OnTransition(
-			func(t efsm.Transition[State, Event], data Data) {
-				fmt.Println("[Telemetry] Connection cleanly aborted.")
-			},
-		))
-	}
-
-	// --- 3. Configure States ---
-	sm.Configure(StateDisconnected)
-
-	sm.Configure(StateConnecting, 
-		withTelemetry, 
-		func(c *efsm.StateConfigurator[State, Event, Data]) {
-			// This OnEntry runs right after the telemetry OnEntry
-			c.OnEntry(func(t efsm.Transition[State, Event], data Data) {
-				fmt.Printf("⏳ Attempting connection to %s...\n", data.IPAddress)
-			})
-
-			c.Permit(EventSuccess, StateConnected, efsm.WithGuard(
-				func(t efsm.Transition[State, Event], data Data) error {
-					if data.IPAddress == "" {
-						return errors.New("missing IP address")
-					}
-					return nil
-				},
-			))
-
-			// Dynamic redirect based on runtime context
-			c.PermitRedirect(EventError, func(t efsm.Transition[State, Event], data Data) State {
-				if data.RetryCount >= 3 {
-					return StateFailed
-				}
-				return StateDisconnected
-			})
-
-			for _, event := range []Event{EventTimeout} {
-				c.Permit(event, StateFailed)
-			}
-		},
-	)
-
-	sm.Configure(StateConnected, 
-		withTelemetry,
-		func(c *efsm.StateConfigurator[State, Event, Data]) {
-			c.OnEntry(func(t efsm.Transition[State, Event], d Data) {
-				fmt.Println("✅ Connection established successfully!")
-			})
-		},
-	)
-
-	sm.Configure(StateFailed, func(c *efsm.StateConfigurator[State, Event, Data]) {
-		c.Permit(EventConnect, StateConnecting)
+	telemetryEntry := efsm.OnEntry(func(t efsm.Transition[State, Event], _ Data) {
+		fmt.Println("entered", t.To)
+	})
+	
+	telemetryExit := efsm.OnExit(func(t efsm.Transition[State, Event], _ Data) {
+		fmt.Println("exited", t.From)
 	})
 
-	// --- 4. Execute ---
-	payload := Data{RetryCount: 3, IPAddress: "192.168.1.100"}
+	sm := efsm.NewStateMachine[State, Event, Data](
+		Disconnected,
 
-	// Use CanFire to check if an action is valid before trying it (great for UI rendering)
-	if sm.CanFire(EventConnect) {
-		fmt.Println("Button 'Connect' is enabled.")
+		efsm.WithState(Disconnected,
+			telemetryEntry,
+			telemetryExit,
+			efsm.WithPermit(Connect, Connecting),
+		),
+
+		efsm.WithState(Connecting,
+			telemetryEntry,
+			telemetryExit,
+			efsm.WithPermit(Success, Connected),
+			efsm.WithPermitRedirect(Failure, func(_ efsm.Transition[State, Event], data Data) State {
+				if data.RetryCount > 2 {
+					return Failed
+				}
+				return Disconnected
+			}),
+		),
+
+		efsm.WithState(Connected,
+			telemetryEntry,
+			telemetryExit,
+			efsm.WithPermit(Reset, Disconnected),
+		),
+
+		efsm.WithState(Failed,
+			efsm.WithPermit(Reset, Disconnected),
+		),
+	)
+
+	if _, err := sm.Fire(Connect, Data{}); err != nil {
+		panic(err)
 	}
 
-	// Use MustFire when you are programmatically certain the event is valid
-	// and want a panic on developer error instead of checking err != nil
-	sm.MustFire(EventConnect, payload)
-
-	// Normal Fire for events that might be rejected by a guard or state mismatch
-	err := sm.Fire(EventError, payload)
-	if err != nil {
-		fmt.Printf("Failed to fire: %v\n", err)
+	if _, err := sm.Fire(Failure, Data{RetryCount: 3}); err != nil {
+		// handle a rejected transition
 	}
-	
-	fmt.Printf("\nFinal State: %s\n", sm.CurrentState())
+
+	fmt.Println("final state:", sm.CurrentState())
 }
 ```
 
-## Important Notes on Concurrency
+`WithState` keeps all behavior for a state together. State options are ordinary
+Go values, so reusable behavior is explicit:
 
-To guarantee that state transitions are strictly atomic and ordered, `efsm` holds an internal lock during the execution of a transition and its associated effects (`OnExit`, `OnTransition`, `OnEntry`).
-
-**⚠️ Warning:** You **MUST NOT** call `sm.Fire()`, `sm.CanFire()`, or `sm.MustFire()` synchronously from within an effect or guard. Doing so will cause a deadlock.
-
-If an entry effect needs to trigger a subsequent state transition, you must spawn a new goroutine to push the event to the back of the line:
 ```go
-sm.Configure(StateConnecting, func(c *efsm.StateConfigurator[State, Event, Data]) {
-    c.OnEntry(func(t efsm.Transition[State, Event], data Data) {
-        // Correct: Run async so the current transition can finish and release the lock
-        go func() {
-            err := connectToNetwork(data.IPAddress)
-            if err != nil {
-                sm.Fire(EventError, data)
-            } else {
-                sm.Fire(EventSuccess, data)
-            }
-        }()
-    })
-})
+var entryLog = efsm.OnEntry(logEntry)
+var exitLog = efsm.OnExit(logExit)
+var disconnect = efsm.WithPermit(EventDisconnect, StateDisconnected)
+
+efsm.WithState(StateConnecting, entryLog, exitLog, disconnect)
+efsm.WithState(StateConnected, entryLog, exitLog, disconnect)
 ```
 
-## Benchmark
+If the same event is permitted more than once for a state, the last permit
+replaces the earlier rule. Fixed permit targets are registered automatically,
+but a target returned by `WithPermitRedirect` must have its own `WithState`
+declaration. Redirecting to the current state is valid and produces a
+self-transition.
 
-```bash
-goos: darwin
-goarch: arm64
-pkg: github.com/webermarci/efsm
-cpu: Apple M5
-BenchmarkStateMachine_Fire-10                   124017261    9.43 ns/op   0 B/op   0 allocs/op
-BenchmarkStateMachine_FireObserver-10            42548539   28.11 ns/op   0 B/op   0 allocs/op
-BenchmarkStateMachine_FireEffects-10            121889860    9.86 ns/op   0 B/op   0 allocs/op
-BenchmarkStateMachine_State_Parallel-10        1000000000    0.19 ns/op   0 B/op   0 allocs/op
-BenchmarkStateMachine_Fire_Parallel-10           17264893   68.48 ns/op   0 B/op   0 allocs/op
-BenchmarkStateMachine_FireRedirect-10           100000000   11.50 ns/op   0 B/op   0 allocs/op
-BenchmarkStateMachine_FireRedirect_Parallel-10   17193207   69.46 ns/op   0 B/op   0 allocs/op
+Callback options must use the machine's data type. For example, a machine
+constructed with `Data` should use `OnEntry`, `OnExit`, `WithGuard`, and
+`WithPermitRedirect` callbacks that also accept `Data`. A non-nil value with a
+mismatched callback type panics when that callback runs.
+
+For a state with no behavior of its own, specify its state and event types so
+Go can infer the otherwise-unused event type:
+
+```go
+efsm.WithState[State, Event](StateFailed)
 ```
+
+Fixed permit targets are registered automatically. Redirect targets must be
+declared with `WithState`; redirecting to an unknown state returns
+`efsm.ErrUnknownState` and leaves the machine unchanged.
+
+## Concurrency
+
+`Fire` serializes the transition, guard, and effects. The state is committed
+before effects run, and effects execute in this order:
+
+1. source `OnExit` effects
+2. permit `OnTransition` effect
+3. target `OnEntry` effects
+
+Callbacks are synchronous and must not call `Fire` recursively. Keep queues,
+actor loops, shutdown, and long-running work in the surrounding application or
+runtime, such as `sup`.
+
+`CurrentState`, `AvailableStates`, `AvailableEvents`, and
+`AvailableEventsForStates` are safe to call concurrently with `Fire`.
+`AvailableEventsForStates` includes only states that have at least one event;
+the returned map and slices can be modified by the caller without changing the
+machine.
+
+## Errors
+
+`Fire` returns the attempted `Transition` even when it returns an error. Use
+the returned error to distinguish an unavailable event, an unknown redirect
+target, or a guard rejection.
+
+Use `errors.Is` with these sentinel errors:
+
+- `ErrInvalidEvent`
+- `ErrUnknownState`
+
+Invalid programmer configuration, such as nil options or callbacks, panics
+during construction. There is no mutable configuration API after construction.

@@ -2,32 +2,21 @@ package efsm
 
 import (
 	"errors"
+	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 )
 
 var (
-	// ErrNoTransitions is returned by Fire when no transitions are defined for the
-	// current state.
-	ErrNoTransitions = errors.New("no transitions defined for state")
-
-	// ErrInvalidEvent is returned by Fire when the supplied event is not valid in
-	// the current state.
+	// ErrInvalidEvent is wrapped by Fire when the supplied event is not valid in
+	// the current state. Use errors.Is to classify the error.
 	ErrInvalidEvent = errors.New("event is not valid in current state")
 
-	// ErrSelfRedirect is returned by builder methods when a transition is configured
-	// to redirect to the source state.
-	ErrSelfRedirect = errors.New("transition cannot redirect to the source state")
+	// ErrUnknownState is wrapped by Fire when a dynamic redirect resolves to a
+	// state that was not declared with WithState.
+	ErrUnknownState = errors.New("redirect resolved to unknown state")
 )
-
-// Observer provides a set of callbacks that can be used to observe state machine behavior.
-type Observer[S comparable, E comparable, D any] struct {
-	OnTransitioning func(t Transition[S, E], data D)
-	OnRedirected    func(t Transition[S, E], newTarget S, data D)
-	OnGuardFiltered func(t Transition[S, E], err error, data D)
-	OnTransitioned  func(t Transition[S, E], data D)
-	OnInvalidEvent  func(t Transition[S, E], data D)
-}
 
 // Transition represents a state change triggered by an event.
 type Transition[S comparable, E comparable] struct {
@@ -36,339 +25,319 @@ type Transition[S comparable, E comparable] struct {
 	Event E
 }
 
-// Guard defines a callback function executed during a state transition.
+// Guard defines a callback that can reject a state transition.
 type Guard[S comparable, E comparable, D any] func(t Transition[S, E], data D) error
 
-// Effect defines a callback function executed after a state transition has occurred.
+// Effect defines a callback executed as part of a state transition.
 type Effect[S comparable, E comparable, D any] func(t Transition[S, E], data D)
 
-// Redirect defines a callback function that can dynamically determine the target state during a transition.
+// Redirect defines a callback that dynamically determines a transition target.
+// The returned state must be declared with WithState.
 type Redirect[S comparable, E comparable, D any] func(t Transition[S, E], data D) S
 
-// TransitionRule defines the outcome of an event, including the target state and an optional guard.
-type TransitionRule[S comparable, E comparable, D any] struct {
-	target     S
-	targetNode *stateData[S, E, D]
-	guard      Guard[S, E, D]
-	effect     Effect[S, E, D]
-	redirect   Redirect[S, E, D]
+type transitionDefinition[S comparable, E comparable] struct {
+	target   *stateDefinition[S, E]
+	guard    func(Transition[S, E], any) error
+	effect   func(Transition[S, E], any)
+	redirect func(Transition[S, E], any) S
 }
 
-// TransitionOption is a functional option type for configuring transition rules.
-type TransitionOption[S comparable, E comparable, D any] func(*TransitionRule[S, E, D])
+type stateDefinition[S comparable, E comparable] struct {
+	machine      *machineBuilder[S, E]
+	state        S
+	declared     bool
+	transitions  map[E]transitionDefinition[S, E]
+	eventOrder   []E
+	entryEffects []func(Transition[S, E], any)
+	exitEffects  []func(Transition[S, E], any)
+}
 
-// WithGuard is a TransitionOption that sets a guard function for a transition rule.
-func WithGuard[S comparable, E comparable, D any](guard Guard[S, E, D]) TransitionOption[S, E, D] {
-	return func(rule *TransitionRule[S, E, D]) {
-		rule.guard = guard
+type machineBuilder[S comparable, E comparable] struct {
+	states     map[S]*stateDefinition[S, E]
+	stateOrder []S
+}
+
+func (b *machineBuilder[S, E]) getOrCreate(state S) *stateDefinition[S, E] {
+	definition, exists := b.states[state]
+	if exists {
+		return definition
+	}
+
+	definition = &stateDefinition[S, E]{
+		machine: b,
+		state:   state,
+	}
+	b.states[state] = definition
+	b.stateOrder = append(b.stateOrder, state)
+	return definition
+}
+
+// StateOption configures one state during NewStateMachine. Values returned by
+// OnEntry, OnExit, WithPermit, and WithPermitRedirect can be stored and reused
+// across multiple WithState options.
+type StateOption[S comparable, E comparable] func(*stateDefinition[S, E])
+
+// TransitionOption configures one permit during NewStateMachine. Values
+// returned by WithGuard and OnTransition can be stored and reused.
+type TransitionOption[S comparable, E comparable] func(*transitionDefinition[S, E])
+
+// StateMachineOption configures a StateMachine during construction.
+type StateMachineOption[S comparable, E comparable] func(*machineBuilder[S, E])
+
+// WithState groups the options belonging to one state. The graph is frozen
+// when NewStateMachine returns; there is no runtime configuration API.
+func WithState[S comparable, E comparable](state S, options ...StateOption[S, E]) StateMachineOption[S, E] {
+	return func(builder *machineBuilder[S, E]) {
+		definition := builder.getOrCreate(state)
+		definition.declared = true
+
+		for _, option := range options {
+			if option == nil {
+				panic("efsm: nil state option")
+			}
+			option(definition)
+		}
 	}
 }
 
-func withRedirect[S comparable, E comparable, D any](redirect Redirect[S, E, D]) TransitionOption[S, E, D] {
-	return func(rule *TransitionRule[S, E, D]) {
-		rule.redirect = redirect
+// WithPermit declares an event transition from the state passed to WithState.
+// If the same event is permitted more than once for a state, the last permit
+// replaces the previous rule.
+func WithPermit[S comparable, E comparable](event E, target S, options ...TransitionOption[S, E]) StateOption[S, E] {
+	return func(definition *stateDefinition[S, E]) {
+		rule := transitionDefinition[S, E]{target: definition.machine.getOrCreate(target)}
+		for _, option := range options {
+			if option == nil {
+				panic("efsm: nil transition option")
+			}
+			option(&rule)
+		}
+
+		// Fixed targets are registered automatically. They may be left without
+		// their own WithState option when they have no behavior of their own.
+		if definition.transitions == nil {
+			definition.transitions = make(map[E]transitionDefinition[S, E])
+		}
+		if _, exists := definition.transitions[event]; !exists {
+			definition.eventOrder = append(definition.eventOrder, event)
+		}
+		definition.transitions[event] = rule
 	}
 }
 
-// OnTransition is a TransitionOption that sets an effect function for a transition rule.
-func OnTransition[S comparable, E comparable, D any](effect Effect[S, E, D]) TransitionOption[S, E, D] {
-	return func(rule *TransitionRule[S, E, D]) {
-		rule.effect = effect
+// WithPermitRedirect declares an event transition whose target is resolved at
+// runtime. The resolved target must be declared with WithState.
+func WithPermitRedirect[S comparable, E comparable, D any](event E, redirect Redirect[S, E, D], options ...TransitionOption[S, E]) StateOption[S, E] {
+	if redirect == nil {
+		panic(fmt.Sprintf("efsm: nil redirect for event %v", event))
+	}
+
+	return func(definition *stateDefinition[S, E]) {
+		rule := transitionDefinition[S, E]{
+			target: definition,
+			redirect: func(t Transition[S, E], data any) S {
+				return redirect(t, castData[D](data))
+			},
+		}
+		for _, option := range options {
+			if option == nil {
+				panic("efsm: nil transition option")
+			}
+			option(&rule)
+		}
+
+		if definition.transitions == nil {
+			definition.transitions = make(map[E]transitionDefinition[S, E])
+		}
+		if _, exists := definition.transitions[event]; !exists {
+			definition.eventOrder = append(definition.eventOrder, event)
+		}
+		definition.transitions[event] = rule
 	}
 }
 
-// StateConfigurator provides a closure-based API for configuring a specific state.
-// It assumes the caller holds the state machine lock, preventing lock thrashing.
-type StateConfigurator[S comparable, E comparable, D any] struct {
-	sm    *StateMachine[S, E, D]
-	state S
-}
-
-// OnEntry adds an effect that runs whenever this state is entered.
-// If called multiple times (e.g., via mixins), the effects are executed in the order they were added.
-func (c *StateConfigurator[S, E, D]) OnEntry(effect Effect[S, E, D]) *StateConfigurator[S, E, D] {
+// OnEntry adds an effect that runs whenever this state is entered. Effects run
+// in the order their options are passed to WithState.
+func OnEntry[S comparable, E comparable, D any](effect Effect[S, E, D]) StateOption[S, E] {
 	if effect == nil {
-		return c
+		panic("efsm: nil entry effect")
 	}
-	node := c.sm.getOrCreateNode(c.state)
-	node.entryEffect = append(node.entryEffect, effect)
-	return c
+
+	return func(definition *stateDefinition[S, E]) {
+		definition.entryEffects = append(definition.entryEffects, func(t Transition[S, E], data any) {
+			effect(t, castData[D](data))
+		})
+	}
 }
 
-// OnExit adds an effect that runs whenever this state is exited.
-// If called multiple times (e.g., via mixins), the effects are executed in the order they were added.
-func (c *StateConfigurator[S, E, D]) OnExit(effect Effect[S, E, D]) *StateConfigurator[S, E, D] {
+// OnExit adds an effect that runs whenever this state is exited. Effects run
+// in the order their options are passed to WithState.
+func OnExit[S comparable, E comparable, D any](effect Effect[S, E, D]) StateOption[S, E] {
 	if effect == nil {
-		return c
-	}
-	node := c.sm.getOrCreateNode(c.state)
-	node.exitEffect = append(node.exitEffect, effect)
-	return c
-}
-
-// Permit defines a valid transition triggered by an event.
-func (c *StateConfigurator[S, E, D]) Permit(event E, target S, opts ...TransitionOption[S, E, D]) *StateConfigurator[S, E, D] {
-	targetNode := c.sm.getOrCreateNode(target)
-
-	rule := TransitionRule[S, E, D]{
-		target:     target,
-		targetNode: targetNode,
+		panic("efsm: nil exit effect")
 	}
 
-	for _, opt := range opts {
-		opt(&rule)
-	}
-
-	sourceNode := c.sm.getOrCreateNode(c.state)
-	if sourceNode.transitions == nil {
-		sourceNode.transitions = make(map[E]TransitionRule[S, E, D])
-	}
-	sourceNode.transitions[event] = rule
-
-	return c
-}
-
-// PermitRedirect defines a transition whose target state is determined dynamically at runtime.
-func (c *StateConfigurator[S, E, D]) PermitRedirect(event E, redirect Redirect[S, E, D], opts ...TransitionOption[S, E, D]) *StateConfigurator[S, E, D] {
-	allOpts := append([]TransitionOption[S, E, D]{withRedirect(redirect)}, opts...)
-	return c.Permit(event, c.state, allOpts...)
-}
-
-type stateData[S comparable, E comparable, D any] struct {
-	boxedState  any
-	transitions map[E]TransitionRule[S, E, D]
-	entryEffect []Effect[S, E, D]
-	exitEffect  []Effect[S, E, D]
-}
-
-// StateMachineOption is a functional option type for configuring the state machine.
-type StateMachineOption[S comparable, E comparable, D any] func(*StateMachine[S, E, D])
-
-// WithObserver is a StateMachineOption that sets an observer for the state machine.
-func WithObserver[S comparable, E comparable, D any](observer *Observer[S, E, D]) StateMachineOption[S, E, D] {
-	return func(sm *StateMachine[S, E, D]) {
-		sm.observer = observer
+	return func(definition *stateDefinition[S, E]) {
+		definition.exitEffects = append(definition.exitEffects, func(t Transition[S, E], data any) {
+			effect(t, castData[D](data))
+		})
 	}
 }
 
-// StateMachine is a running finite state machine instance. It is safe for
-// concurrent use. CurrentState provides 100% lock-free reads.
+// WithGuard rejects a permit when the guard returns an error.
+func WithGuard[S comparable, E comparable, D any](guard Guard[S, E, D]) TransitionOption[S, E] {
+	if guard == nil {
+		panic("efsm: nil guard")
+	}
+
+	return func(rule *transitionDefinition[S, E]) {
+		rule.guard = func(t Transition[S, E], data any) error {
+			return guard(t, castData[D](data))
+		}
+	}
+}
+
+// OnTransition adds an effect that runs for one permit after the new state is
+// committed and before the target state's entry effects.
+func OnTransition[S comparable, E comparable, D any](effect Effect[S, E, D]) TransitionOption[S, E] {
+	if effect == nil {
+		panic("efsm: nil transition effect")
+	}
+
+	return func(rule *transitionDefinition[S, E]) {
+		rule.effect = func(t Transition[S, E], data any) {
+			effect(t, castData[D](data))
+		}
+	}
+}
+
+func castData[D any](data any) D {
+	if data == nil {
+		var zero D
+		return zero
+	}
+	value, ok := data.(D)
+	if !ok {
+		panic(fmt.Sprintf("efsm: event data has type %T, want %T", data, *new(D)))
+	}
+	return value
+}
+
+// StateMachine is an immutable state graph with a safely synchronized current
+// state. Construct it with NewStateMachine; it cannot be reconfigured after
+// construction.
 type StateMachine[S comparable, E comparable, D any] struct {
-	currentState atomic.Value
-	_            [64]byte
-	mutex        sync.RWMutex
-	innerState   S
-	active       *stateData[S, E, D]
-	states       map[S]*stateData[S, E, D]
-	observer     *Observer[S, E, D]
+	currentState atomic.Pointer[stateDefinition[S, E]]
+	mutex        sync.Mutex
+	states       map[S]*stateDefinition[S, E]
+	stateOrder   []S
 }
 
-// NewStateMachine creates a new StateMachine with the specified initial state and optional configuration options. The initial state is registered automatically.
-func NewStateMachine[S comparable, E comparable, D any](initial S, opts ...StateMachineOption[S, E, D]) *StateMachine[S, E, D] {
-	boxedInitial := any(initial)
+// NewStateMachine creates a state machine with an immutable configuration.
+// The initial state is declared automatically. Fixed permit targets are
+// registered automatically; dynamic redirect targets must be declared with
+// WithState.
+func NewStateMachine[S comparable, E comparable, D any](initial S, options ...StateMachineOption[S, E]) *StateMachine[S, E, D] {
+	builder := &machineBuilder[S, E]{
+		states: make(map[S]*stateDefinition[S, E]),
+	}
+	builder.getOrCreate(initial).declared = true
+
+	for _, option := range options {
+		if option == nil {
+			panic("efsm: nil state machine option")
+		}
+		option(builder)
+	}
+
 	sm := &StateMachine[S, E, D]{
-		innerState: initial,
-		states:     make(map[S]*stateData[S, E, D]),
+		states:     builder.states,
+		stateOrder: slices.Clone(builder.stateOrder),
 	}
-
-	for _, opt := range opts {
-		if opt != nil {
-			opt(sm)
-		}
-	}
-
-	sm.active = sm.getOrCreateNode(initial)
-	sm.currentState.Store(boxedInitial)
+	sm.currentState.Store(builder.states[initial])
 	return sm
-}
-
-// Configure locks the state machine once and applies all provided setup functions.
-// If no setup functions are provided, it simply registers the state.
-func (sm *StateMachine[S, E, D]) Configure(state S, setups ...func(c *StateConfigurator[S, E, D])) {
-	sm.mutex.Lock()
-	defer sm.mutex.Unlock()
-
-	sm.getOrCreateNode(state)
-
-	if len(setups) == 0 {
-		return
-	}
-
-	c := &StateConfigurator[S, E, D]{
-		sm:    sm,
-		state: state,
-	}
-
-	for _, setup := range setups {
-		if setup != nil {
-			setup(c)
-		}
-	}
-}
-
-func (sm *StateMachine[S, E, D]) getOrCreateNode(state S) *stateData[S, E, D] {
-	node, exists := sm.states[state]
-	if !exists {
-		node = &stateData[S, E, D]{
-			boxedState: any(state),
-		}
-		sm.states[state] = node
-	}
-	return node
 }
 
 // CurrentState returns the current state of the machine.
 func (sm *StateMachine[S, E, D]) CurrentState() S {
-	return sm.currentState.Load().(S)
+	return sm.currentState.Load().state
 }
 
-// AvailableStates returns a slice of all registered states.
+// AvailableStates returns all registered states in registration order.
 func (sm *StateMachine[S, E, D]) AvailableStates() []S {
-	sm.mutex.RLock()
-	defer sm.mutex.RUnlock()
-
-	var states []S
-	for state := range sm.states {
-		states = append(states, state)
-	}
-	return states
+	return slices.Clone(sm.stateOrder)
 }
 
-// AvailableEvents returns a slice of events that are valid in the current state.
+// AvailableEvents returns the events valid in the current state in registration
+// order.
 func (sm *StateMachine[S, E, D]) AvailableEvents() []E {
-	sm.mutex.RLock()
-	defer sm.mutex.RUnlock()
-
-	data := sm.active
-
-	events := make([]E, 0, len(data.transitions))
-	for event := range data.transitions {
-		events = append(events, event)
-	}
-	return events
+	return slices.Clone(sm.currentState.Load().eventOrder)
 }
 
-// AvailableEventsForStates returns a map of states with their valid events.
+// AvailableEventsForStates returns the valid events for each registered state
+// that has at least one event, in registration order. The returned map and
+// slices are copies. Map key iteration remains subject to Go's map semantics.
 func (sm *StateMachine[S, E, D]) AvailableEventsForStates() map[S][]E {
-	sm.mutex.RLock()
-	defer sm.mutex.RUnlock()
-
 	eventsForStates := make(map[S][]E)
-	for state, node := range sm.states {
-		if len(node.transitions) == 0 {
+	for _, state := range sm.stateOrder {
+		node := sm.states[state]
+		if len(node.eventOrder) == 0 {
 			continue
 		}
-
-		events := make([]E, 0, len(node.transitions))
-		for event := range node.transitions {
-			events = append(events, event)
-		}
-		eventsForStates[state] = events
+		eventsForStates[state] = slices.Clone(node.eventOrder)
 	}
 	return eventsForStates
 }
 
-// CanFire returns true if the event is registered for the current state.
-// Note: This only checks if the transition exists. If the transition has a Guard
-// that would fail, Fire() will still return an error.
-func (sm *StateMachine[S, E, D]) CanFire(event E) bool {
-	sm.mutex.RLock()
-	defer sm.mutex.RUnlock()
-
-	if sm.active == nil || sm.active.transitions == nil {
-		return false
-	}
-	_, exists := sm.active.transitions[event]
-	return exists
-}
-
-// MustFire attempts to transition the state machine and panics if it fails.
-// This is useful for programmatic transitions where an invalid event is considered
-// a fatal developer error, eliminating the need for boilerplate error handling.
-func (sm *StateMachine[S, E, D]) MustFire(event E, data D) {
-	if err := sm.Fire(event, data); err != nil {
-		panic("efsm: MustFire failed: " + err.Error())
-	}
-}
-
-// Fire attempts to transition the state machine using the provided event.
-func (sm *StateMachine[S, E, D]) Fire(event E, data D) error {
+// Fire attempts to transition the state machine using the provided event. It
+// serializes the transition, guard, and effects. The attempted transition is
+// returned even when the transition is rejected.
+func (sm *StateMachine[S, E, D]) Fire(event E, data D) (Transition[S, E], error) {
 	sm.mutex.Lock()
 	defer sm.mutex.Unlock()
 
-	currentNode := sm.active
-
+	currentNode := sm.currentState.Load()
 	transition := Transition[S, E]{
-		From:  sm.innerState,
-		To:    sm.innerState,
+		From:  currentNode.state,
+		To:    currentNode.state,
 		Event: event,
-	}
-
-	if currentNode.transitions == nil {
-		if sm.observer != nil && sm.observer.OnInvalidEvent != nil {
-			sm.observer.OnInvalidEvent(transition, data)
-		}
-		return ErrNoTransitions
 	}
 
 	rule, validEvent := currentNode.transitions[event]
 	if !validEvent {
-		if sm.observer != nil && sm.observer.OnInvalidEvent != nil {
-			sm.observer.OnInvalidEvent(transition, data)
-		}
-		return ErrInvalidEvent
+		return transition, fmt.Errorf("%w (event %v, state %v)", ErrInvalidEvent, event, currentNode.state)
 	}
 
-	transition.To = rule.target
-
-	if sm.observer != nil && sm.observer.OnTransitioning != nil {
-		sm.observer.OnTransitioning(transition, data)
-	}
-
+	transition.To = rule.target.state
 	if rule.guard != nil {
 		if err := rule.guard(transition, data); err != nil {
-			if sm.observer != nil && sm.observer.OnGuardFiltered != nil {
-				sm.observer.OnGuardFiltered(transition, err, data)
-			}
-			return err
+			return transition, fmt.Errorf("guard rejected event %v in state %v: %w", event, currentNode.state, err)
 		}
 	}
 
+	targetNode := rule.target
 	if rule.redirect != nil {
 		redirectTarget := rule.redirect(transition, data)
-
-		if redirectTarget == transition.From {
-			return ErrSelfRedirect
+		redirectedNode, exists := sm.states[redirectTarget]
+		if !exists || !redirectedNode.declared {
+			transition.To = redirectTarget
+			return transition, fmt.Errorf("%w (event %v, state %v, target %v)", ErrUnknownState, event, transition.From, redirectTarget)
 		}
-
-		if sm.observer != nil && sm.observer.OnRedirected != nil {
-			sm.observer.OnRedirected(transition, redirectTarget, data)
-		}
-
-		rule.target = redirectTarget
-		rule.targetNode = sm.getOrCreateNode(redirectTarget)
+		targetNode = redirectedNode
 		transition.To = redirectTarget
 	}
 
-	sm.innerState = rule.target
-	sm.currentState.Store(rule.targetNode.boxedState)
-	sm.active = rule.targetNode
+	sm.currentState.Store(targetNode)
 
-	for _, effect := range currentNode.exitEffect {
+	for _, effect := range currentNode.exitEffects {
 		effect(transition, data)
 	}
-
 	if rule.effect != nil {
 		rule.effect(transition, data)
 	}
-
-	for _, effect := range rule.targetNode.entryEffect {
+	for _, effect := range targetNode.entryEffects {
 		effect(transition, data)
 	}
 
-	if sm.observer != nil && sm.observer.OnTransitioned != nil {
-		sm.observer.OnTransitioned(transition, data)
-	}
-
-	return nil
+	return transition, nil
 }
