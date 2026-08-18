@@ -140,6 +140,104 @@ func TestStateMachine_GuardAndErrorContext(t *testing.T) {
 	}
 }
 
+func TestStateMachine_CheckValidatesWithoutMutating(t *testing.T) {
+	t.Parallel()
+
+	var calls []string
+	guardErr := errors.New("blocked")
+	sm := efsm.NewStateMachine[State, Event, *DataContext](
+		StateIdle,
+		efsm.WithState(StateIdle,
+			efsm.OnExit(func(efsm.Transition[State, Event], *DataContext) {
+				calls = append(calls, "exit")
+			}),
+			efsm.WithPermit(EventStart, StateRunning,
+				efsm.WithGuard(func(_ efsm.Transition[State, Event], data *DataContext) error {
+					calls = append(calls, "guard")
+					if data.Retries < 0 {
+						return guardErr
+					}
+					return nil
+				}),
+				efsm.OnTransition(func(efsm.Transition[State, Event], *DataContext) {
+					calls = append(calls, "transition")
+				}),
+			),
+		),
+		efsm.WithState(StateRunning,
+			efsm.OnEntry(func(efsm.Transition[State, Event], *DataContext) {
+				calls = append(calls, "entry")
+			}),
+		),
+	)
+
+	transition, err := sm.Check(EventStart, &DataContext{Retries: 1})
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if want := (efsm.Transition[State, Event]{From: StateIdle, To: StateRunning, Event: EventStart}); transition != want {
+		t.Fatalf("transition = %+v, want %+v", transition, want)
+	}
+	if state := sm.CurrentState(); state != StateIdle {
+		t.Fatalf("current state after Check() = %v, want %v", state, StateIdle)
+	}
+	if want := []string{"guard"}; !reflect.DeepEqual(calls, want) {
+		t.Fatalf("callbacks after Check() = %v, want %v", calls, want)
+	}
+
+	transition, err = sm.Check(EventStart, &DataContext{Retries: -1})
+	if !errors.Is(err, guardErr) {
+		t.Fatalf("rejected Check() error = %v, want wrapped guard error", err)
+	}
+	if transition.To != StateRunning || sm.CurrentState() != StateIdle {
+		t.Fatalf("rejected Check() changed transition/state: transition=%+v state=%v", transition, sm.CurrentState())
+	}
+	if want := []string{"guard", "guard"}; !reflect.DeepEqual(calls, want) {
+		t.Fatalf("callbacks after rejected Check() = %v, want %v", calls, want)
+	}
+}
+
+func TestStateMachine_CheckResolvesRedirectAndReportsErrors(t *testing.T) {
+	t.Parallel()
+
+	sm := efsm.NewStateMachine[State, Event, *DataContext](
+		StateIdle,
+		efsm.WithState(StateIdle,
+			efsm.WithPermitRedirect(EventRedirect, func(_ efsm.Transition[State, Event], data *DataContext) State {
+				if data.Retries > 0 {
+					return StateRunning
+				}
+				return StateError
+			}),
+		),
+		efsm.WithState[State, Event](StateRunning),
+	)
+
+	transition, err := sm.Check(EventRedirect, &DataContext{Retries: 1})
+	if err != nil || transition.To != StateRunning {
+		t.Fatalf("redirect Check() = (%+v, %v), want target RUNNING", transition, err)
+	}
+	if sm.CurrentState() != StateIdle {
+		t.Fatalf("current state after redirect Check() = %v, want %v", sm.CurrentState(), StateIdle)
+	}
+
+	unknown := efsm.NewStateMachine[State, Event, *DataContext](
+		StateIdle,
+		efsm.WithState(StateIdle,
+			efsm.WithPermitRedirect(EventRedirect, func(_ efsm.Transition[State, Event], _ *DataContext) State {
+				return StateOther
+			}),
+		),
+	)
+	transition, err = unknown.Check(EventRedirect, nil)
+	if !errors.Is(err, efsm.ErrUnknownState) || transition.To != StateOther {
+		t.Fatalf("unknown redirect Check() = (%+v, %v), want unknown-state error", transition, err)
+	}
+	if unknown.CurrentState() != StateIdle {
+		t.Fatalf("current state after unknown redirect Check() = %v, want %v", unknown.CurrentState(), StateIdle)
+	}
+}
+
 func TestStateMachine_EffectOrderAndCommittedState(t *testing.T) {
 	t.Parallel()
 

@@ -2,9 +2,9 @@
 // machine for modeling workflows and stateful business logic.
 //
 // A StateMachine is configured once with functional options and then runs with
-// Fire. Its state graph is immutable after construction. Rules can include
-// guards, dynamic redirects, transition effects, entry effects, and exit
-// effects.
+// Check and Fire. Its state graph is immutable after construction. Rules can
+// include guards, dynamic redirects, transition effects, entry effects, and
+// exit effects.
 //
 // # Getting started
 //
@@ -34,6 +34,11 @@
 //
 //	state := transition.To
 //
+// Use Check to validate an event, including its guard and dynamic redirect,
+// without changing the current state or running effects:
+//
+//	transition, err := sm.Check(Start, nil)
+//
 // State options are ordinary Go values and can be reused across WithState
 // calls. For example, an entry effect can be stored once and passed to several
 // states. Repeated permits for the same state and event use the last rule.
@@ -59,20 +64,25 @@
 //
 // # Concurrency
 //
-// StateMachine is safe for concurrent use. Fire serializes a transition, its
-// guard, and its effects. CurrentState and the inspection methods are safe to
-// call concurrently and do not acquire the transition mutex.
+// StateMachine is safe for concurrent use. Check serializes an event, its
+// guard, and its redirect resolution without changing the state or running
+// effects. Fire serializes a transition, its guard, and its effects.
+// CurrentState and the inspection methods are safe to call concurrently and do
+// not acquire the transition mutex.
+// Check and a later Fire are separate operations, so the state may change
+// between them. If validation and the state change must be atomic, call Fire
+// and handle its returned error.
 //
-// Effects and guards run synchronously. Do not call Fire from a guard or
-// effect, because Fire is not reentrant and the callback runs while the
+// Effects and guards run synchronously. Do not call Check or Fire from a guard
+// or effect, because neither method is reentrant and callbacks run while the
 // transition is locked. Keep long-running work in the surrounding event loop
 // or actor runtime and submit a later event when that work completes.
 //
 // # Errors and inspection
 //
-// Fire returns the attempted Transition even when a transition is rejected.
-// Errors wrap ErrInvalidEvent when the event is not configured for the current
-// state, including when the state has no rules, ErrUnknownState when a redirect
-// resolves to an undeclared state, or the guard's error when a guard rejects a
-// transition. Use errors.Is to classify them.
+// Check and Fire return the attempted Transition even when a transition is
+// rejected. Errors wrap ErrInvalidEvent when the event is not configured for
+// the current state, including when the state has no rules, ErrUnknownState
+// when a redirect resolves to an undeclared state, or the guard's error when a
+// guard rejects a transition. Use errors.Is to classify them.
 package efsm

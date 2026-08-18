@@ -9,12 +9,12 @@ import (
 )
 
 var (
-	// ErrInvalidEvent is wrapped by Fire when the supplied event is not valid in
-	// the current state. Use errors.Is to classify the error.
+	// ErrInvalidEvent is wrapped by Fire or Check when the supplied event is not
+	// valid in the current state. Use errors.Is to classify the error.
 	ErrInvalidEvent = errors.New("event is not valid in current state")
 
-	// ErrUnknownState is wrapped by Fire when a dynamic redirect resolves to a
-	// state that was not declared with WithState.
+	// ErrUnknownState is wrapped by Fire or Check when a dynamic redirect
+	// resolves to a state that was not declared with WithState.
 	ErrUnknownState = errors.New("redirect resolved to unknown state")
 )
 
@@ -50,6 +50,13 @@ type stateDefinition[S comparable, E comparable] struct {
 	eventOrder   []E
 	entryEffects []func(Transition[S, E], any)
 	exitEffects  []func(Transition[S, E], any)
+}
+
+type resolvedTransition[S comparable, E comparable] struct {
+	transition Transition[S, E]
+	rule       transitionDefinition[S, E]
+	source     *stateDefinition[S, E]
+	target     *stateDefinition[S, E]
 }
 
 type machineBuilder[S comparable, E comparable] struct {
@@ -289,6 +296,59 @@ func (sm *StateMachine[S, E, D]) AvailableEventsForStates() map[S][]E {
 	return eventsForStates
 }
 
+// resolveTransition validates an event and resolves its target while the
+// caller holds sm.mutex. It does not commit the target or run effects.
+func (sm *StateMachine[S, E, D]) resolveTransition(event E, data D) (resolvedTransition[S, E], error) {
+	currentNode := sm.currentState.Load()
+	resolved := resolvedTransition[S, E]{
+		transition: Transition[S, E]{
+			From:  currentNode.state,
+			To:    currentNode.state,
+			Event: event,
+		},
+		source: currentNode,
+	}
+
+	rule, validEvent := currentNode.transitions[event]
+	if !validEvent {
+		return resolved, fmt.Errorf("%w (event %v, state %v)", ErrInvalidEvent, event, currentNode.state)
+	}
+
+	resolved.rule = rule
+	resolved.transition.To = rule.target.state
+	if rule.guard != nil {
+		if err := rule.guard(resolved.transition, data); err != nil {
+			return resolved, fmt.Errorf("guard rejected event %v in state %v: %w", event, currentNode.state, err)
+		}
+	}
+
+	resolved.target = rule.target
+	if rule.redirect != nil {
+		redirectTarget := rule.redirect(resolved.transition, data)
+		redirectedNode, exists := sm.states[redirectTarget]
+		if !exists || !redirectedNode.declared {
+			resolved.transition.To = redirectTarget
+			return resolved, fmt.Errorf("%w (event %v, state %v, target %v)", ErrUnknownState, event, resolved.transition.From, redirectTarget)
+		}
+		resolved.target = redirectedNode
+		resolved.transition.To = redirectTarget
+	}
+
+	return resolved, nil
+}
+
+// Check validates the provided event without changing the current state or
+// running effects. It serializes the transition and its guards, and evaluates
+// dynamic redirects just as Fire does. The attempted transition is returned
+// even when the transition is rejected.
+func (sm *StateMachine[S, E, D]) Check(event E, data D) (Transition[S, E], error) {
+	sm.mutex.Lock()
+	defer sm.mutex.Unlock()
+
+	resolved, err := sm.resolveTransition(event, data)
+	return resolved.transition, err
+}
+
 // Fire attempts to transition the state machine using the provided event. It
 // serializes the transition, guard, and effects. The attempted transition is
 // returned even when the transition is rejected.
@@ -296,48 +356,22 @@ func (sm *StateMachine[S, E, D]) Fire(event E, data D) (Transition[S, E], error)
 	sm.mutex.Lock()
 	defer sm.mutex.Unlock()
 
-	currentNode := sm.currentState.Load()
-	transition := Transition[S, E]{
-		From:  currentNode.state,
-		To:    currentNode.state,
-		Event: event,
+	resolved, err := sm.resolveTransition(event, data)
+	if err != nil {
+		return resolved.transition, err
 	}
 
-	rule, validEvent := currentNode.transitions[event]
-	if !validEvent {
-		return transition, fmt.Errorf("%w (event %v, state %v)", ErrInvalidEvent, event, currentNode.state)
+	sm.currentState.Store(resolved.target)
+
+	for _, effect := range resolved.source.exitEffects {
+		effect(resolved.transition, data)
+	}
+	if resolved.rule.effect != nil {
+		resolved.rule.effect(resolved.transition, data)
+	}
+	for _, effect := range resolved.target.entryEffects {
+		effect(resolved.transition, data)
 	}
 
-	transition.To = rule.target.state
-	if rule.guard != nil {
-		if err := rule.guard(transition, data); err != nil {
-			return transition, fmt.Errorf("guard rejected event %v in state %v: %w", event, currentNode.state, err)
-		}
-	}
-
-	targetNode := rule.target
-	if rule.redirect != nil {
-		redirectTarget := rule.redirect(transition, data)
-		redirectedNode, exists := sm.states[redirectTarget]
-		if !exists || !redirectedNode.declared {
-			transition.To = redirectTarget
-			return transition, fmt.Errorf("%w (event %v, state %v, target %v)", ErrUnknownState, event, transition.From, redirectTarget)
-		}
-		targetNode = redirectedNode
-		transition.To = redirectTarget
-	}
-
-	sm.currentState.Store(targetNode)
-
-	for _, effect := range currentNode.exitEffects {
-		effect(transition, data)
-	}
-	if rule.effect != nil {
-		rule.effect(transition, data)
-	}
-	for _, effect := range targetNode.entryEffects {
-		effect(transition, data)
-	}
-
-	return transition, nil
+	return resolved.transition, nil
 }

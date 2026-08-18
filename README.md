@@ -13,6 +13,7 @@ guards, redirects, and effects.
 - **Immutable configuration:** The transition graph is frozen by `NewStateMachine`.
 - **Type-safe states and events:** State and event types are generic and comparable.
 - **Safe concurrency:** Transitions are serialized; current-state and inspection reads are safe concurrently.
+- **Dry-run validation:** Use `Check` to run guards and redirects without changing state or running effects.
 - **Reusable options:** State behavior is grouped with `WithState`, while individual options can be reused across states.
 - **Guards and effects:** Use `WithGuard`, `OnEntry`, `OnExit`, and `OnTransition`.
 - **Dynamic routing:** Use `WithPermitRedirect` when the target depends on event data.
@@ -126,6 +127,18 @@ but a target returned by `WithPermitRedirect` must have its own `WithState`
 declaration. Redirecting to the current state is valid and produces a
 self-transition.
 
+Use `Check` when you need to validate an event before firing it. It runs the
+same guard and redirect logic as `Fire`, returns the resolved `Transition`, and
+leaves the current state and all effects unchanged:
+
+```go
+transition, err := sm.Check(Connect, Data{})
+```
+
+`Check` and a later `Fire` are separate operations, so the state may change
+between them. If validation and the state change must be atomic, call `Fire`
+and handle its returned error.
+
 Callback options must use the machine's data type. For example, a machine
 constructed with `Data` should use `OnEntry`, `OnExit`, `WithGuard`, and
 `WithPermitRedirect` callbacks that also accept `Data`. A non-nil value with a
@@ -144,28 +157,31 @@ declared with `WithState`; redirecting to an unknown state returns
 
 ## Concurrency
 
-`Fire` serializes the transition, guard, and effects. The state is committed
-before effects run, and effects execute in this order:
+`Check` serializes event validation, guards, and redirect resolution without
+changing state or running effects. `Fire` serializes the transition, guard, and
+effects. The state is committed before effects run, and effects execute in this
+order:
 
 1. source `OnExit` effects
 2. permit `OnTransition` effect
 3. target `OnEntry` effects
 
-Callbacks are synchronous and must not call `Fire` recursively. Keep queues,
-actor loops, shutdown, and long-running work in the surrounding application or
-runtime, such as `sup`.
+Callbacks are synchronous and must not call `Check` or `Fire` recursively. Keep
+queues, actor loops, shutdown, and long-running work in the surrounding
+application or runtime, such as `sup`.
 
 `CurrentState`, `AvailableStates`, `AvailableEvents`, and
-`AvailableEventsForStates` are safe to call concurrently with `Fire`.
+`AvailableEventsForStates` are safe to call concurrently with `Check` or
+`Fire`.
 `AvailableEventsForStates` includes only states that have at least one event;
 the returned map and slices can be modified by the caller without changing the
 machine.
 
 ## Errors
 
-`Fire` returns the attempted `Transition` even when it returns an error. Use
-the returned error to distinguish an unavailable event, an unknown redirect
-target, or a guard rejection.
+`Check` and `Fire` return the attempted `Transition` even when they return an
+error. Use the returned error to distinguish an unavailable event, an unknown
+redirect target, or a guard rejection.
 
 Use `errors.Is` with these sentinel errors:
 
